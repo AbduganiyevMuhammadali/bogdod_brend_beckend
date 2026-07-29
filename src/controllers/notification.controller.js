@@ -1,0 +1,110 @@
+const webpush = require('web-push');
+const PushSubscriptionModel = require('../models/push_subscription.model');
+const AppSettingModel = require('../models/app_setting.model');
+const { vapidPublicKey, vapidPrivateKey, vapidSubject } = require('../startup/config');
+const BaseController = require('./BaseController');
+
+webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
+
+// Har kuni ertalabki xush kelibsiz xabarlari — Sellz brendiga mos, tasodifiy tanlanadi
+const GREETINGS = [
+  { title: "Xayrli tong! ☀️",          body: "Yangi kun, yangi savdolar! Sellz siz bilan — omadli kun tilaymiz." },
+  { title: "Assalomu alaykum! 🌅",     body: "Bugungi kun barakali va savdolaringiz sara bo'lsin!" },
+  { title: "Sellz — xayrli tong! 🚀",  body: "Bugun ham rejalaringiz amalga oshsin, kassa doim to'lib tursin!" },
+  { title: "Yangi kun boshlandi! 💪",  body: "Bugungi savdo bugungidan ham yaxshiroq bo'lsin. Omad, Sellz jamoasi!" },
+  { title: "Xayrli tong! 🌤️",          body: "Har bir yangi kun — yangi imkoniyat. Savdolaringiz baraka topsin!" },
+  { title: "Sellz sizga xayrli tong tilaydi 🎉", body: "Do'koningizga tashrif buyuruvchilar ko'p, savdo shirin bo'lsin!" },
+  { title: "Bugun ham g'alaba kuni! 🏆", body: "Mijozlaringiz ko'p, savdolaringiz baraka topsin. Xayrli tong!" },
+  { title: "Yangi kun — yangi baraka! ✨", body: "Sellz jamoasidan sizga xayrli tong va yaxshi savdo tilaymiz!" },
+];
+
+function randomGreeting() {
+  return GREETINGS[Math.floor(Math.random() * GREETINGS.length)];
+}
+
+class NotificationController extends BaseController {
+
+  // Brauzer push uchun kerakli public VAPID kalitni frontend so'rab oladi
+  getPublicKey = async (req, res) => {
+    res.json({ publicKey: vapidPublicKey });
+  };
+
+  // Foydalanuvchi push ruxsat bergandan keyin, brauzer bergan obunani saqlaydi
+  subscribe = async (req, res) => {
+    const { endpoint, keys } = req.body;
+    if (!endpoint || !keys?.p256dh || !keys?.auth) {
+      return res.status(400).json({ message: "Noto'g'ri obuna ma'lumotlari" });
+    }
+    await PushSubscriptionModel.upsert({
+      endpoint,
+      p256dh: keys.p256dh,
+      auth: keys.auth,
+      user_id: req.currentUser.id,
+    });
+    res.json({ ok: true });
+  };
+
+  unsubscribe = async (req, res) => {
+    const { endpoint } = req.body;
+    if (endpoint) await PushSubscriptionModel.destroy({ where: { endpoint } });
+    res.json({ ok: true });
+  };
+
+  // ── Faqat Dasturchi uchun ──────────────────────────────────────
+  getSettings = async (req, res) => {
+    const rows = await AppSettingModel.findAll({
+      where: { key: ['daily_notification_enabled', 'daily_notification_time'] },
+    });
+    const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
+    res.json({
+      enabled: map.daily_notification_enabled !== 'false',
+      time: map.daily_notification_time || '08:00',
+    });
+  };
+
+  updateSettings = async (req, res) => {
+    const { enabled, time } = req.body;
+    if (time && !/^([01]\d|2[0-3]):([0-5]\d)$/.test(time)) {
+      return res.status(400).json({ message: "Vaqt formati noto'g'ri (SS:DD)" });
+    }
+    if (enabled !== undefined) {
+      await AppSettingModel.upsert({ key: 'daily_notification_enabled', value: String(!!enabled) });
+    }
+    if (time) {
+      await AppSettingModel.upsert({ key: 'daily_notification_time', value: time });
+    }
+    res.json({ ok: true });
+  };
+
+  // Dasturchi sinov uchun darhol o'ziga xabar yubora oladi
+  sendTest = async (req, res) => {
+    const count = await sendDailyGreeting();
+    res.json({ ok: true, sent: count });
+  };
+}
+
+// cron.js dan chaqiriladi — barcha obunachilarga bugungi tabrik xabarini yuboradi
+async function sendDailyGreeting() {
+  const subs = await PushSubscriptionModel.findAll();
+  const { title, body } = randomGreeting();
+  const payload = JSON.stringify({ title, body, icon: '/favicon.png' });
+
+  let sent = 0;
+  await Promise.all(subs.map(async (sub) => {
+    try {
+      await webpush.sendNotification(
+        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+        payload
+      );
+      sent++;
+    } catch (e) {
+      // Obuna eskirgan/bekor qilingan bo'lsa — bazadan tozalaymiz
+      if (e.statusCode === 404 || e.statusCode === 410) {
+        await PushSubscriptionModel.destroy({ where: { id: sub.id } });
+      }
+    }
+  }));
+  return sent;
+}
+
+module.exports = { controller: new NotificationController(), sendDailyGreeting, AppSettingModel };

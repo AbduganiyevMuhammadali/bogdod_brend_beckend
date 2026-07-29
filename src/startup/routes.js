@@ -12,6 +12,7 @@ const saleRouter     = require('../routes/sale.route');
 const clientRouter   = require('../routes/client.route');
 const reportRouter    = require('../routes/report.route');
 const supplierRouter  = require('../routes/supplier.route');
+const notificationRouter = require('../routes/notification.route');
 const HttpException = require('../utils/HttpException.utils');
 
 module.exports = async function(app){
@@ -35,6 +36,7 @@ module.exports = async function(app){
         app.use('/api/v1/clients',  clientRouter);
         app.use('/api/v1/reports',    reportRouter);
         app.use('/api/v1/suppliers',  supplierRouter);
+        app.use('/api/v1/notifications', notificationRouter);
             
         // 404 error
         app.all('*', (req, res, next) => {

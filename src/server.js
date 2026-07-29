@@ -5,6 +5,7 @@ require('./startup/db')();
 const {port} = require('./startup/config');
 require('./startup/routes')(app);
 require('./startup/migration')();
+require('./startup/notificationCron')();
 
 app.listen(port, () => console.log(`🚀 Server running on port ${port}!`))
     .on('error', (e) => {
