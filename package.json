@@ -1,0 +1,107 @@
+{
+  "name": "backend",
+  "productName": "backend",
+  "version": "1.0.0",
+  "description": " backend dasturi",
+  "main": "back/main.js",
+  "scripts": {
+    "start": "electron-forge start",
+    "package": "webpack && electron-forge package",
+    "make": "electron-forge make",
+    "publish": "electron-forge publish",
+    "lint": "echo \"No linting configured\"",
+    "inspect": "electron-forge start --inspect-electron",
+    "pack": "webpack",
+    "migrate:up": "npx sequelize-cli db:migrate",
+    "migrate:undo": "npx sequelize-cli db:migrate:undo",
+    "migrate:undo:all": "npx sequelize-cli db:migrate:undo:all",
+    "seed": "npx sequelize-cli db:seed:all",
+    "migration:create": "npx sequelize-cli migration:generate --name"
+  },
+  "keywords": [
+    "bdm",
+    "backend",
+    "nodejs",
+    "electron",
+    "electron-forge"
+  ],
+  "author": {
+    "name": "Muhammadali",
+    "email": "muhammadalijunior07@gmail.com"
+  },
+  "license": "MIT",
+  "config": {
+    "forge": {
+      "packagerConfig": {
+        "icon": "build/icon.ico",
+        "asar": true
+      },
+      "makers": [
+        {
+          "name": "@electron-forge/maker-squirrel",
+          "config": {
+            "name": "electron_forge_test"
+          }
+        },
+        {
+          "name": "@electron-forge/maker-zip",
+          "platforms": [
+            "darwin"
+          ]
+        },
+        {
+          "name": "@electron-forge/maker-deb",
+          "config": {}
+        },
+        {
+          "name": "@electron-forge/maker-rpm",
+          "config": {}
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "axios": "^0.21.1",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^8.2.0",
+    "dotenv-webpack": "^7.0.2",
+    "electron-squirrel-startup": "^1.0.0",
+    "exceljs": "^4.2.1",
+    "express": "^4.17.1",
+    "express-async-errors": "^3.1.1",
+    "express-validator": "^6.6.0",
+    "html-webpack-plugin": "^5.3.2",
+    "i18n": "^0.15.0",
+    "ini": "^2.0.0",
+    "joi": "^17.6.4",
+    "jsonwebtoken": "^8.5.1",
+    "lodash": "^4.17.21",
+    "moment": "^2.29.1",
+    "multer": "^1.4.2",
+    "mysql2": "^2.1.0",
+    "mysqldump": "^3.2.0",
+    "node-cron": "^3.0.2",
+    "read-excel-file": "^5.2.4",
+    "redis": "^3.1.2",
+    "sequelize": "^6.6.2",
+    "umzug": "^3.2.1",
+    "webpack": "^5.44.0",
+    "webpack-cli": "^4.7.0",
+    "webpack-node-externals": "^3.0.0",
+    "winston": "^3.3.3"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^6.0.0-beta.54",
+    "@electron-forge/maker-deb": "^6.0.0-beta.54",
+    "@electron-forge/maker-rpm": "^6.0.0-beta.54",
+    "@electron-forge/maker-squirrel": "^6.0.0-beta.54",
+    "@electron-forge/maker-zip": "^6.0.0-beta.54",
+    "electron": "^12.0.14",
+    "i18n-extract": "^0.6.7",
+    "normalize-url": "^6.0.1",
+    "terser-webpack-plugin": "^5.1.2",
+    "trim-newlines": "^4.0.1"
+  }
+}

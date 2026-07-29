@@ -1,0 +1,8 @@
+{
+	"name": "name",
+	"{name} is required": "{name} is required",
+	"{name} length must be [{min}:{max}]": "{name} length must be [{min}:{max}]",
+	"datetime1": "datetime1",
+	"{name} must be integer": "{name} must be integer",
+	"datetime2": "datetime2"
+}

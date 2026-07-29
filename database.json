@@ -1,0 +1,20 @@
+{
+    "dev": {
+      "host": "localhost",
+      "port": {"ENV" : "DB_PORT"},
+      "user": { "ENV" : "DB_USER" },
+      "password" : { "ENV" : "DB_PASS" },
+      "database": { "ENV" : "DB_DATABASE" },
+      "driver": "mysql",
+      "multipleStatements": true
+    },
+    "prod": {
+      "host": "localhost",
+      "port": {"ENV" : "DB_PORT"},
+      "user": { "ENV" : "DB_USER" },
+      "password" : { "ENV" : "DB_PASS" },
+      "database": { "ENV" : "DB_DATABASE" },
+      "driver": "mysql",
+      "multipleStatements": true
+    }
+}
