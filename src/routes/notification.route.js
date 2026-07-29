@@ -9,6 +9,10 @@ router.get('/public-key',  auth(), awaitHF(ctrl.getPublicKey));
 router.post('/subscribe',   auth(), awaitHF(ctrl.subscribe));
 router.post('/unsubscribe', auth(), awaitHF(ctrl.unsubscribe));
 
+// Android (Capacitor) ilova uchun FCM token ro'yxati
+router.post('/fcm-register',   auth(), awaitHF(ctrl.registerFcmToken));
+router.post('/fcm-unregister', auth(), awaitHF(ctrl.unregisterFcmToken));
+
 // Faqat "Dasturchi" hisobi bildirishnoma vaqtini sozlay oladi
 router.get('/settings',        auth('Dasturchi'), awaitHF(ctrl.getSettings));
 router.patch('/settings',      auth('Dasturchi'), awaitHF(ctrl.updateSettings));

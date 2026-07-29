@@ -2,6 +2,7 @@ const webpush = require('web-push');
 const PushSubscriptionModel = require('../models/push_subscription.model');
 const AppSettingModel = require('../models/app_setting.model');
 const { vapidPublicKey, vapidPrivateKey, vapidSubject } = require('../startup/config');
+const { messaging } = require('../startup/firebase');
 const BaseController = require('./BaseController');
 
 webpush.setVapidDetails(vapidSubject, vapidPublicKey, vapidPrivateKey);
@@ -50,6 +51,23 @@ class NotificationController extends BaseController {
     res.json({ ok: true });
   };
 
+  // Android (Capacitor) ilova FCM tokenini shu orqali ro'yxatdan o'tkazadi
+  registerFcmToken = async (req, res) => {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ message: "Token yuborilmadi" });
+    await PushSubscriptionModel.upsert({
+      fcm_token: token,
+      user_id: req.currentUser.id,
+    });
+    res.json({ ok: true });
+  };
+
+  unregisterFcmToken = async (req, res) => {
+    const { token } = req.body;
+    if (token) await PushSubscriptionModel.destroy({ where: { fcm_token: token } });
+    res.json({ ok: true });
+  };
+
   // ── Faqat Dasturchi uchun ──────────────────────────────────────
   getSettings = async (req, res) => {
     const rows = await AppSettingModel.findAll({
@@ -83,27 +101,50 @@ class NotificationController extends BaseController {
   };
 }
 
-// cron.js dan chaqiriladi — barcha obunachilarga bugungi tabrik xabarini yuboradi
+// cron.js dan chaqiriladi — barcha obunachilarga (brauzer + Android/FCM) bugungi tabrik xabarini yuboradi
 async function sendDailyGreeting() {
   const subs = await PushSubscriptionModel.findAll();
   const { title, body } = randomGreeting();
-  const payload = JSON.stringify({ title, body, icon: '/favicon.png' });
 
   let sent = 0;
-  await Promise.all(subs.map(async (sub) => {
+
+  // Brauzer obunachilari (Web Push / VAPID)
+  const webSubs = subs.filter(s => s.endpoint);
+  const webPayload = JSON.stringify({ title, body, icon: '/favicon.png' });
+  await Promise.all(webSubs.map(async (sub) => {
     try {
       await webpush.sendNotification(
         { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-        payload
+        webPayload
       );
       sent++;
     } catch (e) {
-      // Obuna eskirgan/bekor qilingan bo'lsa — bazadan tozalaymiz
       if (e.statusCode === 404 || e.statusCode === 410) {
         await PushSubscriptionModel.destroy({ where: { id: sub.id } });
       }
     }
   }));
+
+  // Android obunachilari (Firebase Cloud Messaging)
+  const fcmSubs = subs.filter(s => s.fcm_token);
+  if (messaging) {
+    await Promise.all(fcmSubs.map(async (sub) => {
+      try {
+        await messaging.send({
+          token: sub.fcm_token,
+          notification: { title, body },
+          android: { priority: 'high', notification: { channelId: 'daily-greeting' } },
+        });
+        sent++;
+      } catch (e) {
+        // Token eskirgan/bekor qilingan bo'lsa — bazadan tozalaymiz
+        if (e.code === 'messaging/registration-token-not-registered' || e.code === 'messaging/invalid-registration-token') {
+          await PushSubscriptionModel.destroy({ where: { id: sub.id } });
+        }
+      }
+    }));
+  }
+
   return sent;
 }
 
