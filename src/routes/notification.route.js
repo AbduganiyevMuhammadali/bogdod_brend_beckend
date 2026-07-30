@@ -17,5 +17,6 @@ router.post('/fcm-unregister', auth(), awaitHF(ctrl.unregisterFcmToken));
 router.get('/settings',        auth('Dasturchi'), awaitHF(ctrl.getSettings));
 router.patch('/settings',      auth('Dasturchi'), awaitHF(ctrl.updateSettings));
 router.post('/send-test',      auth('Dasturchi'), awaitHF(ctrl.sendTest));
+router.get('/diagnostics',     auth('Dasturchi'), awaitHF(ctrl.diagnostics));
 
 module.exports = router;

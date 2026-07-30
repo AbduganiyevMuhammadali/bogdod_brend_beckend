@@ -96,8 +96,31 @@ class NotificationController extends BaseController {
 
   // Dasturchi sinov uchun darhol o'ziga xabar yubora oladi
   sendTest = async (req, res) => {
-    const count = await sendDailyGreeting();
-    res.json({ ok: true, sent: count });
+    const result = await sendDailyGreeting();
+    res.json({ ok: true, ...result });
+  };
+
+  // Obunalar holatini ko'rish — push kelmasa, sababni aniqlash uchun.
+  // Tokenlarni to'liq ko'rsatmaymiz, faqat oxirgi belgilarini.
+  diagnostics = async (req, res) => {
+    const subs = await PushSubscriptionModel.findAll({
+      attributes: ['id', 'user_id', 'endpoint', 'fcm_token', 'createdAt'],
+      order: [['createdAt', 'DESC']],
+    });
+    res.json({
+      firebase_ulangan: !!messaging,
+      jami: subs.length,
+      android: subs.filter(s => s.fcm_token).length,
+      brauzer: subs.filter(s => s.endpoint).length,
+      obunalar: subs.map(s => ({
+        id: s.id,
+        user_id: s.user_id,
+        tur: s.fcm_token ? 'android' : (s.endpoint ? 'brauzer' : 'nomalum'),
+        belgi: s.fcm_token ? `...${String(s.fcm_token).slice(-12)}`
+             : (s.endpoint ? `...${String(s.endpoint).slice(-24)}` : null),
+        qoshilgan: s.createdAt,
+      })),
+    });
   };
 }
 
@@ -107,6 +130,8 @@ async function sendDailyGreeting() {
   const { title, body } = randomGreeting();
 
   let sent = 0;
+  const web_ok = { n: 0 }, fcm_ok = { n: 0 };
+  const xatolar = [];
 
   // Brauzer obunachilari (Web Push / VAPID)
   const webSubs = subs.filter(s => s.endpoint);
@@ -117,8 +142,9 @@ async function sendDailyGreeting() {
         { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
         webPayload
       );
-      sent++;
+      sent++; web_ok.n++;
     } catch (e) {
+      xatolar.push(`brauzer#${sub.id}: ${e.statusCode || ''} ${e.message || e}`);
       if (e.statusCode === 404 || e.statusCode === 410) {
         await PushSubscriptionModel.destroy({ where: { id: sub.id } });
       }
@@ -135,17 +161,28 @@ async function sendDailyGreeting() {
           notification: { title, body },
           android: { priority: 'high', notification: { channelId: 'daily-greeting' } },
         });
-        sent++;
+        sent++; fcm_ok.n++;
       } catch (e) {
+        xatolar.push(`android#${sub.id}: ${e.code || ''} ${e.message || e}`);
         // Token eskirgan/bekor qilingan bo'lsa — bazadan tozalaymiz
         if (e.code === 'messaging/registration-token-not-registered' || e.code === 'messaging/invalid-registration-token') {
           await PushSubscriptionModel.destroy({ where: { id: sub.id } });
         }
       }
     }));
+  } else if (fcmSubs.length) {
+    xatolar.push('Firebase ulanmagan: secrets/firebase-service-account.json topilmadi');
   }
 
-  return sent;
+  return {
+    sent,
+    brauzer_yuborildi: web_ok.n,
+    android_yuborildi: fcm_ok.n,
+    brauzer_obuna: webSubs.length,
+    android_obuna: fcmSubs.length,
+    firebase_ulangan: !!messaging,
+    xatolar,
+  };
 }
 
 module.exports = { controller: new NotificationController(), sendDailyGreeting, AppSettingModel };

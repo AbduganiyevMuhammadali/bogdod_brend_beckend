@@ -26,8 +26,9 @@ module.exports = function startNotificationCron() {
 
       if (`${hh}:${mm}` === time && lastSentAt !== nowKey) {
         lastSentAt = nowKey;
-        const sent = await sendDailyGreeting();
-        logger.info(`Kunlik bildirishnoma yuborildi: ${sent} ta qurilmaga`);
+        const r = await sendDailyGreeting();
+        logger.info(`Kunlik bildirishnoma: ${r.sent} ta qurilmaga (android ${r.android_yuborildi}/${r.android_obuna}, brauzer ${r.brauzer_yuborildi}/${r.brauzer_obuna})`);
+        if (r.xatolar.length) logger.warn('Bildirishnoma xatolari: ' + r.xatolar.join(' | '));
       }
     } catch (e) {
       logger.error('Bildirishnoma cron xatosi: ' + e.message);
