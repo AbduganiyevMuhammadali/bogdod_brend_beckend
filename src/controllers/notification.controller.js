@@ -159,7 +159,20 @@ async function sendDailyGreeting() {
         await messaging.send({
           token: sub.fcm_token,
           notification: { title, body },
-          android: { priority: 'high', notification: { channelId: 'daily-greeting' } },
+          android: {
+            priority: 'high',
+            notification: {
+              channelId: 'daily-greeting',
+              // Kanal telefonda hali yaratilmagan bo'lsa Android xabarni
+              // jimgina tashlab yuboradi. Quyidagilar standart kanalga
+              // tushib qolgan holatda ham ko'rinishini ta'minlaydi.
+              sound: 'default',
+              defaultSound: true,
+              defaultVibrateTimings: true,
+              notificationPriority: 'PRIORITY_MAX',
+              visibility: 'PUBLIC',
+            },
+          },
         });
         sent++; fcm_ok.n++;
       } catch (e) {
