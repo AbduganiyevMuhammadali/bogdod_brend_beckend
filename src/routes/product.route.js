@@ -36,6 +36,9 @@ router.post('/upload',        auth(), perm('products', 'qoshish'), upload.single
 // POST /api/v1/products
 router.post('/',              auth(), perm('products', 'qoshish'), awaitHF(ctrl.create));
 
+// POST /api/v1/products/bulk  (tezkor kiritish — ko'p mahsulot + boshlang'ich qoldiq)
+router.post('/bulk',          auth(), perm('products', 'qoshish'), awaitHF(ctrl.bulkCreate));
+
 // PUT /api/v1/products/:id   (full update)
 router.put('/:id',            auth(), perm('products', 'tahrir'), awaitHF(ctrl.update));
 

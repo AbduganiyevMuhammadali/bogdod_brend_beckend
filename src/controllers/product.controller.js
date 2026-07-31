@@ -76,6 +76,128 @@ class ProductController extends BaseController {
     res.status(201).json(product);
   };
 
+  // Do'konni tizimga o'tkazishda ishlatiladi: bir necha o'nlab mahsulotni
+  // bitta so'rovda yaratadi va ular uchun bitta "boshlang'ich qoldiq" kirim
+  // hujjatini ochadi. Kirim hujjati shart — FIFO tannarx shu orqali
+  // shakllanadi, aks holda foyda hisoboti tannarxsiz qoladi.
+  //
+  // Kutilayotgan tana:
+  //   { items: [{ ...mahsulot maydonlari, cost_price, qty }], supplier_id? }
+  // Har bir element ixtiyoriy ravishda `sizes: [{ size, qty, barcode }]`
+  // berishi mumkin — bunda har razmer alohida mahsulot bo'lib yaratiladi.
+  bulkCreate = async (req, res) => {
+    const { items = [], supplier_id = null, doc_date = null } = req.body;
+    if (!Array.isArray(items) || !items.length) {
+      throw new HttpException(400, 'Mahsulotlar ro\'yxati bo\'sh');
+    }
+
+    // Razmerli qatorlarni alohida mahsulotlarga yoyamiz
+    const expanded = [];
+    items.forEach((it, idx) => {
+      const sizes = Array.isArray(it.sizes) ? it.sizes.filter(s => s && s.size) : [];
+      if (!sizes.length) {
+        expanded.push({ src: idx, data: it, qty: Number(it.qty) || 0, barcodes: it.barcodes });
+        return;
+      }
+      sizes.forEach(s => {
+        expanded.push({
+          src: idx,
+          data: {
+            ...it,
+            model: s.size,                       // razmer `model` maydonida saqlanadi
+            name: [it.brand, it.general_name || it.name, s.size, it.color]
+              .map(v => (v || '').toString().trim()).filter(Boolean).join(' '),
+          },
+          qty: Number(s.qty) || 0,
+          barcodes: s.barcode ? [s.barcode] : [],
+        });
+      });
+    });
+
+    // Kiritishdan oldin tekshiramiz — yarim yozilgan holat qolmasligi uchun
+    const xatolar = [];
+    expanded.forEach((e, i) => {
+      const nm = (e.data.name || e.data.general_name || '').toString().trim();
+      if (!nm) xatolar.push(`${e.src + 1}-qator: nomi bo'sh`);
+      if (Number(e.data.retail_price) < 0) xatolar.push(`${e.src + 1}-qator: sotuv narxi manfiy`);
+      if (Number(e.data.cost_price) < 0)   xatolar.push(`${e.src + 1}-qator: tannarx manfiy`);
+    });
+    if (xatolar.length) throw new HttpException(400, xatolar.join('; '));
+
+    const sequelize = ProductModel.sequelize;
+    const PurchaseModel     = require('../models/purchase.model');
+    const PurchaseItemModel = require('../models/purchase_item.model');
+
+    let created = [];
+    let purchaseId = null;
+
+    await sequelize.transaction(async (t) => {
+      let counter = await ProductModel.count({ transaction: t });
+
+      for (const e of expanded) {
+        const data = this._pick(e.data);
+        data.name = (data.name || data.general_name || '').toString().trim();
+        if (!data.general_name) data.general_name = data.name;
+        if (!data.code) data.code = `PRD-${String(++counter).padStart(5, '0')}`;
+        if (e.barcodes) data.barcodes = e.barcodes;
+        data.qty = 0;   // qoldiq kirim hujjati orqali qo'shiladi
+
+        const p = await ProductModel.create(data, { transaction: t });
+        created.push({ product: p, qty: e.qty, cost: Number(e.data.cost_price) || 0 });
+      }
+
+      // Qoldiqli mahsulotlar uchun bitta kirim hujjati
+      const withQty = created.filter(c => c.qty > 0);
+      if (withQty.length) {
+        const maxDoc = await PurchaseModel.max('doc_number', { transaction: t });
+        const total  = withQty.reduce((a, c) => a + c.qty * c.cost, 0);
+
+        const purchase = await PurchaseModel.create({
+          doc_number: (Number(maxDoc) || 0) + 1,
+          date: doc_date || new Date(),
+          supplier_id,
+          comment: 'Boshlang\'ich qoldiq',
+          status: 'confirmed',
+          total_sum: total,
+          created_by: req.currentUser?.id ?? null,
+        }, { transaction: t });
+        purchaseId = purchase.id;
+
+        await PurchaseItemModel.bulkCreate(
+          withQty.map(c => ({
+            purchase_id:    purchase.id,
+            product_id:     c.product.id,
+            product_name:   c.product.name,
+            barcode:        (c.product.barcodes || [])[0] || null,
+            pkg_qty:        c.qty,
+            unit_qty:       c.qty,
+            units_per_pkg:  1,
+            stock_qty:      c.qty,       // FIFO uchun mavjud qoldiq
+            sold_qty:       0,
+            pkg_price:      c.cost,
+            unit_price:     c.cost,
+            cost_price:     c.cost,
+            total_sum:      c.qty * c.cost,
+            total_cost_sum: c.qty * c.cost,
+            retail_price_sum: Number(c.product.retail_price) || 0,
+          })),
+          { transaction: t }
+        );
+
+        for (const c of withQty) {
+          await c.product.update({ qty: c.qty }, { transaction: t });
+        }
+      }
+    });
+
+    res.status(201).json({
+      ok: true,
+      yaratildi: created.length,
+      kirim_hujjati: purchaseId,
+      mahsulotlar: created.map(c => ({ id: c.product.id, name: c.product.name })),
+    });
+  };
+
   update = async (req, res) => {
     const product = await ProductModel.findOne({ where: { id: req.params.id } });
     if (!product) throw new HttpException(404, req.mf('data not found'));
