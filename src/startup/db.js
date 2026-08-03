@@ -40,6 +40,44 @@ module.exports = async function(){
         \`updated_at\` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
+    // Inventarizatsiya jadvallari
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS \`inventory\` (
+        \`id\`             INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        \`doc_number\`     INT NOT NULL,
+        \`date\`           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        \`warehouse\`      VARCHAR(100) DEFAULT 'Asosiy ombor',
+        \`comment\`        TEXT DEFAULT NULL,
+        \`status\`         ENUM('draft','finished','cancelled') NOT NULL DEFAULT 'draft',
+        \`total_expected\` DECIMAL(15,3) NOT NULL DEFAULT 0,
+        \`total_counted\`  DECIMAL(15,3) NOT NULL DEFAULT 0,
+        \`total_diff_sum\` DECIMAL(18,2) NOT NULL DEFAULT 0,
+        \`created_by\`     INT DEFAULT NULL,
+        \`finished_at\`    DATETIME DEFAULT NULL,
+        \`created_at\`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\`     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS \`inventory_item\` (
+        \`id\`           INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        \`inventory_id\` INT NOT NULL,
+        \`product_id\`   INT DEFAULT NULL,
+        \`product_name\` VARCHAR(200) NOT NULL,
+        \`barcode\`      VARCHAR(100) DEFAULT NULL,
+        \`expected_qty\` DECIMAL(15,3) NOT NULL DEFAULT 0,
+        \`counted_qty\`  DECIMAL(15,3) NOT NULL DEFAULT 0,
+        \`cost_price\`   DECIMAL(15,2) NOT NULL DEFAULT 0,
+        \`is_extra\`     TINYINT(1) NOT NULL DEFAULT 0,
+        \`scanned_at\`   DATETIME DEFAULT NULL,
+        \`created_at\`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_inv\` (\`inventory_id\`),
+        INDEX \`idx_inv_barcode\` (\`inventory_id\`, \`barcode\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+
     for (const [table, col, def] of migrations) {
         try {
             await db.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${col}\` ${def}`);

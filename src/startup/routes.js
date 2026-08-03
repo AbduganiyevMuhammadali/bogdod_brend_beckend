@@ -13,6 +13,7 @@ const clientRouter   = require('../routes/client.route');
 const reportRouter    = require('../routes/report.route');
 const supplierRouter  = require('../routes/supplier.route');
 const notificationRouter = require('../routes/notification.route');
+const inventoryRouter    = require('../routes/inventory.route');
 const HttpException = require('../utils/HttpException.utils');
 
 module.exports = async function(app){
@@ -32,6 +33,7 @@ module.exports = async function(app){
         app.use('/api/v1/users',     userRouter);
         app.use('/api/v1/products',  productRouter);
         app.use('/api/v1/purchases', purchaseRouter);
+        app.use('/api/v1/inventories', inventoryRouter);
         app.use('/api/v1/sales',    saleRouter);
         app.use('/api/v1/clients',  clientRouter);
         app.use('/api/v1/reports',    reportRouter);
