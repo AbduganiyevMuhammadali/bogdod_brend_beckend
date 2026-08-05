@@ -11,6 +11,28 @@ const ALLOWED_FIELDS = [
   'is_folder', 'active',
 ];
 
+// Keyingi bo'sh PRD-kodni topadi.
+//
+// count() ga tayanib bo'lmaydi: mahsulot o'chirilganda (paranoid: true)
+// u sanalmaydi, lekin kodi bazada qoladi — natijada "code must be unique"
+// xatosi chiqadi. Shuning uchun mavjud eng katta raqamdan davom etamiz va
+// band kodni uchratsak keyingisiga o'tamiz.
+async function nextProductCode(transaction = null) {
+  const last = await ProductModel.findOne({
+    where: { code: { [Op.like]: 'PRD-%' } },
+    order: [['code', 'DESC']],
+    paranoid: false,
+    transaction,
+  });
+  let n = last ? (parseInt(String(last.code).replace('PRD-', ''), 10) || 0) : 0;
+
+  let code;
+  do {
+    code = `PRD-${String(++n).padStart(5, '0')}`;
+  } while (await ProductModel.findOne({ where: { code }, paranoid: false, transaction }));
+  return code;
+}
+
 class ProductController extends BaseController {
 
   getAll = async (req, res) => {
@@ -66,11 +88,7 @@ class ProductController extends BaseController {
 
     if (!data.name) throw new HttpException(400, 'Mahsulot nomi kiritilishi shart');
 
-    // auto-generate code if empty
-    if (!data.code) {
-      const count = await ProductModel.count();
-      data.code = `PRD-${String(count + 1).padStart(5, '0')}`;
-    }
+    if (!data.code) data.code = await nextProductCode();
 
     const product = await ProductModel.create(data);
     res.status(201).json(product);
@@ -132,13 +150,35 @@ class ProductController extends BaseController {
     let purchaseId = null;
 
     await sequelize.transaction(async (t) => {
-      let counter = await ProductModel.count({ transaction: t });
+      // Kod count() dan yasalsa, o'chirilgan mahsulotlar sanalmaydi
+      // (paranoid: true), lekin ularning kodi bazada qoladi — natijada
+      // takroriy kod chiqadi. Shuning uchun mavjud eng katta PRD-raqamdan
+      // davom ettiramiz, o'chirilganlarni ham hisobga olib.
+      const lastCoded = await ProductModel.findOne({
+        where: { code: { [Op.like]: 'PRD-%' } },
+        order: [['code', 'DESC']],
+        paranoid: false,
+        transaction: t,
+      });
+      let counter = lastCoded
+        ? (parseInt(String(lastCoded.code).replace('PRD-', ''), 10) || 0)
+        : 0;
 
       for (const e of expanded) {
         const data = this._pick(e.data);
         data.name = (data.name || data.general_name || '').toString().trim();
         if (!data.general_name) data.general_name = data.name;
-        if (!data.code) data.code = `PRD-${String(++counter).padStart(5, '0')}`;
+
+        // Kod bo'sh bo'lsa yasaymiz; band bo'lsa keyingisiga o'tamiz
+        if (!data.code) {
+          let code;
+          do {
+            code = `PRD-${String(++counter).padStart(5, '0')}`;
+          } while (await ProductModel.findOne({
+            where: { code }, paranoid: false, transaction: t,
+          }));
+          data.code = code;
+        }
         if (e.barcodes) data.barcodes = e.barcodes;
         data.qty = 0;   // qoldiq kirim hujjati orqali qo'shiladi
 
