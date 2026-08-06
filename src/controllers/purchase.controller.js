@@ -4,6 +4,7 @@ const PurchaseModel        = require('../models/purchase.model');
 const PurchaseItemModel    = require('../models/purchase_item.model');
 const ProductModel         = require('../models/product.model');
 const SaleItemModel        = require('../models/sale_item.model');
+const ProductRegisterModel = require('../models/product_register.model');
 const SupplierModel        = require('../models/supplier.model');
 const HttpException        = require('../utils/HttpException.utils');
 const BaseController       = require('./BaseController');
@@ -188,6 +189,92 @@ class PurchaseController extends BaseController {
     await PurchaseItemModel.destroy({ where: { purchase_id: purchase.id } });
     await purchase.destroy({ force: true });
     res.json({ message: req.mf('data has been deleted') });
+  };
+
+  // Tezkor kiritishda tannarx ko'pincha "keyin kiritamiz" deb bo'sh qoldiriladi.
+  // Bu yerda saqlangan hujjatning bitta qatoridagi tannarx va sotuv narxini
+  // keyinchalik to'g'rilash mumkin. Tannarx FIFO foydasini belgilaydi, shuning
+  // uchun shu partiyadan allaqachon sotilgan yozuvlar (product_register,
+  // sale_item) ham yangi tannarxga ko'chiriladi — aks holda foyda hisoboti
+  // 0 tannarx bilan qolib ketadi.
+  updateItemPrices = async (req, res) => {
+    const item = await PurchaseItemModel.findOne({
+      where:   { id: req.params.itemId, purchase_id: req.params.id },
+      include: [{ model: PurchaseModel, as: 'purchase' }],
+    });
+    if (!item) throw new HttpException(404, req.mf('data not found'));
+
+    const hasCost   = req.body.cost_price       !== undefined && req.body.cost_price       !== null && req.body.cost_price       !== '';
+    const hasRetail = req.body.retail_price_sum !== undefined && req.body.retail_price_sum !== null && req.body.retail_price_sum !== '';
+    if (!hasCost && !hasRetail) throw new HttpException(400, 'Yangilash uchun narx yuborilmadi');
+
+    const costPrice   = hasCost   ? Number(req.body.cost_price)       : Number(item.cost_price);
+    const retailPrice = hasRetail ? Number(req.body.retail_price_sum) : Number(item.retail_price_sum);
+    if (hasCost   && (!Number.isFinite(costPrice)   || costPrice   < 0)) throw new HttpException(400, 'Tannarx noto\'g\'ri');
+    if (hasRetail && (!Number.isFinite(retailPrice) || retailPrice < 0)) throw new HttpException(400, 'Sotuv narxi noto\'g\'ri');
+
+    const unitQty = Number(item.unit_qty) || 0;
+
+    await sequelize.transaction(async (t) => {
+      const itemUpdates = {};
+      if (hasCost) {
+        itemUpdates.cost_price     = costPrice;
+        itemUpdates.unit_price     = costPrice;
+        itemUpdates.pkg_price      = costPrice * (Number(item.units_per_pkg) || 1);
+        itemUpdates.total_sum      = costPrice * unitQty;
+        itemUpdates.total_cost_sum = costPrice * unitQty;
+      }
+      if (hasRetail) itemUpdates.retail_price_sum = retailPrice;
+      await item.update(itemUpdates, { transaction: t });
+
+      // Hujjat jami summasi qatorlar yig'indisidan qayta hisoblanadi
+      if (hasCost && item.purchase) {
+        const rows = await PurchaseItemModel.findAll({
+          where: { purchase_id: item.purchase_id }, transaction: t,
+        });
+        const total = rows.reduce((a, r) => a + (Number(r.total_sum) || 0), 0);
+        const rate  = Number(item.purchase.exchange_rate) || 11000;
+
+        // Yetkazuvchi qarzi hujjat summasidan kelib chiqadi — farqni tuzatamiz
+        const diff = total - (Number(item.purchase.total_sum) || 0);
+        if (diff !== 0 && item.purchase.status === 'confirmed' && item.purchase.supplier_id) {
+          const supplier = await SupplierModel.findByPk(item.purchase.supplier_id, { transaction: t });
+          if (supplier) {
+            await supplier.update(
+              { balance: Number(supplier.balance) - diff },
+              { transaction: t }
+            );
+          }
+        }
+
+        await item.purchase.update(
+          { total_sum: total, total_usd: rate > 0 ? total / rate : 0 },
+          { transaction: t }
+        );
+      }
+
+      // Mahsulot kartochkasidagi sotuv narxi (tannarx product jadvalida
+      // saqlanmaydi — u har doim partiyadan, ya'ni FIFO orqali olinadi)
+      if (hasRetail && item.product_id) {
+        const product = await ProductModel.findByPk(item.product_id, { transaction: t });
+        if (product) await product.update({ retail_price: retailPrice }, { transaction: t });
+      }
+
+      // Shu partiyadan sotilgan yozuvlardagi tannarx — foyda hisoboti uchun
+      if (hasCost) {
+        await ProductRegisterModel.update(
+          { cost_price: costPrice },
+          { where: { purchase_item_id: item.id, status: 'active' }, transaction: t }
+        );
+        await SaleItemModel.update(
+          { cost_price: costPrice },
+          { where: { purchase_item_id: item.id }, transaction: t }
+        );
+      }
+    });
+
+    const fresh = await PurchaseItemModel.findByPk(item.id);
+    res.json(fresh);
   };
 
   getFifoPrices = async (req, res) => {

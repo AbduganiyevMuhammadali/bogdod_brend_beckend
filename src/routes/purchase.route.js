@@ -12,6 +12,7 @@ router.get('/',              auth(), awaitHF(ctrl.getAll));
 router.get('/:id',           auth(), awaitHF(ctrl.getById));
 router.post('/',             auth(), perm('purchases', 'qoshish'), awaitHF(ctrl.create));
 router.put('/:id',           auth(), perm('purchases', 'tahrir'),  awaitHF(ctrl.update));
+router.patch('/:id/items/:itemId/prices', auth(), perm('purchases', 'tahrir'), awaitHF(ctrl.updateItemPrices));
 router.post('/:id/confirm',  auth(), perm('purchases', 'qoshish'), awaitHF(ctrl.confirm));
 router.post('/:id/cancel',   auth(), perm('purchases', 'tahrir'),  awaitHF(ctrl.cancel));
 router.delete('/:id',        auth(), perm('purchases', 'tahrir'),  awaitHF(ctrl.delete));
