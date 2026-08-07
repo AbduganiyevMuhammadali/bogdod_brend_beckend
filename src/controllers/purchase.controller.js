@@ -277,35 +277,56 @@ class PurchaseController extends BaseController {
     res.json(fresh);
   };
 
+  // Har mahsulot uchun eng eski ochiq partiyaning narxi (FIFO).
+  //
+  // Ilgari BARCHA ochiq partiyalar tortib olinib, keraklisi JS da
+  // tanlanardi — sotuv sahifasi har qidiruvda shuni chaqirgani uchun
+  // mahsulot ko'paygan sari sezilarli kechikish berardi.
+  // Endi tanlash SQL da bo'ladi va `ids` berilsa faqat o'sha
+  // mahsulotlar uchun hisoblanadi.
   getFifoPrices = async (req, res) => {
-    const batches = await PurchaseItemModel.findAll({
-      include: [{
-        model:      PurchaseModel,
-        as:         'purchase',
-        where:      { status: 'confirmed' },
-        attributes: ['id', 'date'],
-      }],
-      where: sequelize.literal(
-        '(`PurchaseItemModel`.`unit_qty` - `PurchaseItemModel`.`sold_qty`) > 0'
-      ),
-      order: [
-        [{ model: PurchaseModel, as: 'purchase' }, 'date', 'ASC'],
-        ['id', 'ASC'],
-      ],
-      attributes: ['product_id', 'retail_price_sum', 'wholesale_price_sum', 'cost_price'],
-    });
+    const ids = String(req.query.ids || '')
+      .split(',')
+      .map(v => parseInt(v, 10))
+      .filter(Number.isInteger);
 
-    const result = {};
-    for (const b of batches) {
-      if (!b.product_id || result[b.product_id]) continue;
-      result[b.product_id] = {
-        product_id:      b.product_id,
-        retail_price:    Number(b.retail_price_sum)    || 0,
-        wholesale_price: Number(b.wholesale_price_sum) || 0,
-        cost_price:      Number(b.cost_price)          || 0,
-      };
-    }
-    res.json(Object.values(result));
+    // Har product_id bo'yicha eng eski partiyani tanlaymiz: avval
+    // guruhlab minimal (sana, id) ni topamiz, so'ng o'sha qatorni olamiz.
+    const rows = await sequelize.query(
+      `SELECT pi.product_id,
+              pi.retail_price_sum,
+              pi.wholesale_price_sum,
+              pi.cost_price
+         FROM purchase_item pi
+         JOIN purchase p ON p.id = pi.purchase_id
+         JOIN (
+              SELECT pi2.product_id,
+                     MIN(CONCAT(DATE_FORMAT(p2.date, '%Y%m%d%H%i%s'),
+                                LPAD(pi2.id, 12, '0'))) AS mk
+                FROM purchase_item pi2
+                JOIN purchase p2 ON p2.id = pi2.purchase_id
+               WHERE p2.status = 'confirmed'
+                 AND (pi2.unit_qty - pi2.sold_qty) > 0
+                 AND pi2.product_id IS NOT NULL
+                 ${ids.length ? 'AND pi2.product_id IN (:ids)' : ''}
+               GROUP BY pi2.product_id
+         ) f ON f.product_id = pi.product_id
+            AND CONCAT(DATE_FORMAT(p.date, '%Y%m%d%H%i%s'),
+                       LPAD(pi.id, 12, '0')) = f.mk
+        WHERE p.status = 'confirmed'
+          AND (pi.unit_qty - pi.sold_qty) > 0`,
+      {
+        replacements: ids.length ? { ids } : {},
+        type: sequelize.QueryTypes.SELECT,
+      }
+    );
+
+    res.json(rows.map(b => ({
+      product_id:      b.product_id,
+      retail_price:    Number(b.retail_price_sum)    || 0,
+      wholesale_price: Number(b.wholesale_price_sum) || 0,
+      cost_price:      Number(b.cost_price)          || 0,
+    })));
   };
 
   getBatches = async (req, res) => {

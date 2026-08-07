@@ -84,6 +84,27 @@ module.exports = async function(){
             console.log(`${table}.${col} qoshildi`);
         } catch { /* already exists */ }
     }
+
+    // Indekslar — mahsulot ko'payganda sotuv sahifasi sekinlashmasligi uchun.
+    // `product.name` bo'yicha indekssiz har so'rovda butun jadval saralanardi
+    // (Table scan + Sort). Mavjud bo'lsa xato beradi, uni e'tiborsiz qoldiramiz.
+    const indexes = [
+        ['product',          'idx_product_name',      '(`name`)'],
+        ['product',          'idx_product_active',    '(`active`)'],
+        ['purchase_item',    'idx_pi_prod_sold',      '(`product_id`, `sold_qty`)'],
+        ['sale',             'idx_sale_date',         '(`date`)'],
+        ['sale_item',        'idx_si_sale',           '(`sale_id`)'],
+        ['kassa_register',   'idx_kr_date',           '(`date`)'],
+        ['product_register', 'idx_pr_date',           '(`date`)'],
+        ['product_register', 'idx_pr_pitem',          '(`purchase_item_id`)'],
+        ['cash_transaction', 'idx_ct_date',           '(`date`)'],
+    ];
+    for (const [table, name, cols] of indexes) {
+        try {
+            await db.query(`ALTER TABLE \`${table}\` ADD INDEX \`${name}\` ${cols}`);
+            console.log(`${table}.${name} indeksi qoshildi`);
+        } catch { /* already exists */ }
+    }
     // .catch(err => { Global exception hadler borligi uchun
     //     console.error('Baza bilan aloqa uzildi xatolik ->:', err);
     // });
