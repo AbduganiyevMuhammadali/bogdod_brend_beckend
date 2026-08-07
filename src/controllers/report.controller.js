@@ -89,13 +89,11 @@ class ReportController {
 
   // ── Today's sales list ────────────────────────────────────────
   getTodaySales = async (req, res) => {
+    // Kun chegarasi mahalliy vaqtda — dateRange.utils.js ga qarang
     const { date } = req.query
-    const today = date ? new Date(date) : new Date()
-    today.setHours(0, 0, 0, 0)
-    const todayEnd = new Date(today); todayEnd.setHours(23, 59, 59, 999)
 
     const sales = await SaleModel.findAll({
-      where:   { status: 'completed', date: { [Op.between]: [today, todayEnd] } },
+      where:   { status: 'completed', date: dayRange(date) },
       order:   [['date', 'DESC']],
       include: [
         { model: ClientModel,   as: 'client',  attributes: ['id', 'name'], required: false },
