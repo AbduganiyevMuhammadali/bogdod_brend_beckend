@@ -36,7 +36,13 @@ async function nextProductCode(transaction = null) {
 class ProductController extends BaseController {
 
   getAll = async (req, res) => {
-    const { search, category, active, page = 1, limit = 200 } = req.query;
+    // limit=0 (yoki 'all') — hammasini qaytar. Mahsulotlar sahifasi butun
+    // ro'yxatni bir marta oladi: do'konda bir necha ming tovar bo'lsa ham
+    // qidiruv/filtr brauzerda darhol ishlashi kerak.
+    const { search, category, active, page = 1 } = req.query;
+    const rawLimit = req.query.limit;
+    const noLimit  = rawLimit === '0' || rawLimit === 'all';
+    const limit    = noLimit ? null : (Number(rawLimit) > 0 ? Number(rawLimit) : 200);
     const where = {};
 
     if (search) {
@@ -51,13 +57,10 @@ class ProductController extends BaseController {
     if (category && category !== 'all') where.category = category;
     if (active !== undefined) where.active = active === 'true';
 
-    const offset = (Number(page) - 1) * Number(limit);
-
     const { count, rows } = await ProductModel.findAndCountAll({
       where,
       order: [['name', 'ASC']],
-      limit:  Number(limit),
-      offset,
+      ...(noLimit ? {} : { limit, offset: (Number(page) - 1) * limit }),
     });
 
     res.json({ total: count, page: Number(page), data: rows });
