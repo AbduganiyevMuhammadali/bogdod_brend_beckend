@@ -9,19 +9,15 @@ const ProductModel           = require('../models/product.model')
 const SupplierModel          = require('../models/supplier.model')
 const PurchaseModel          = require('../models/purchase.model')
 const CashTransactionModel   = require('../models/cash_transaction.model')
+const { dateRange, dayRange: dayRangeUtil } = require('../utils/dateRange.utils')
 
+// Kun chegaralari mahalliy vaqtda hisoblanadi — dateRange.utils.js ga qarang
 function dayRange(dateStr) {
-  const d = dateStr ? new Date(dateStr) : new Date()
-  const from = new Date(d); from.setHours(0,  0,  0, 0)
-  const to   = new Date(d); to.setHours(23, 59, 59, 999)
-  return { [Op.between]: [from, to] }
+  return dayRangeUtil(Op, dateStr || new Date())
 }
 
 function range(from, to) {
-  const w = {}
-  if (from) w[Op.gte] = new Date(from)
-  if (to)   w[Op.lte] = new Date(to + 'T23:59:59')
-  return w
+  return dateRange(Op, from, to) || {}
 }
 
 class ReportController {
@@ -739,15 +735,13 @@ class ReportController {
       const purchaseWhere = { supplier_id: s.id, status: 'confirmed' }
       if (date_from || date_to) {
         purchaseWhere.date = {}
-        if (date_from) purchaseWhere.date[Op.gte] = new Date(date_from)
-        if (date_to)   purchaseWhere.date[Op.lte] = new Date(date_to + 'T23:59:59')
+        Object.assign(purchaseWhere.date, dateRange(Op, date_from, date_to) || {})
       }
 
       const payWhere = { reference_type: 'supplier_payment', reference_id: s.id }
       if (date_from || date_to) {
         payWhere.date = {}
-        if (date_from) payWhere.date[Op.gte] = new Date(date_from)
-        if (date_to)   payWhere.date[Op.lte] = new Date(date_to + 'T23:59:59')
+        Object.assign(payWhere.date, dateRange(Op, date_from, date_to) || {})
       }
 
       const [purchasedSum, purchasedUsd, paidSum] = await Promise.all([

@@ -9,6 +9,7 @@ const CashTransactionModel  = require('../models/cash_transaction.model')
 const ProductRegisterModel  = require('../models/product_register.model')
 const KassaRegisterModel    = require('../models/kassa_register.model')
 const HttpException         = require('../utils/HttpException.utils')
+const { dateRange }         = require('../utils/dateRange.utils')
 
 class SaleController {
 
@@ -18,11 +19,11 @@ class SaleController {
     const where = {}
     if (status    && status !== 'all') where.status    = status
     if (client_id && client_id !== 'all') where.client_id = client_id
-    if (date_from || date_to) {
-      where.date = {}
-      if (date_from) where.date[Op.gte] = new Date(date_from)
-      if (date_to)   where.date[Op.lte] = new Date(date_to + 'T23:59:59')
-    }
+    // Kun chegarasi mahalliy vaqtda — ilgari `new Date('2026-08-06')`
+    // UTC yarim tuni deb o'qilib, filtr soat 05:00 dan boshlanardi va
+    // tongdagi savdolar tushib qolardi.
+    const dr = dateRange(Op, date_from, date_to)
+    if (dr) where.date = dr
     if (search) {
       where[Op.or] = [
         { '$client.name$': { [Op.like]: `%${search}%` } },
@@ -291,11 +292,11 @@ class SaleController {
   getCashReport = async (req, res) => {
     const { date_from, date_to } = req.query
     const where = {}
-    if (date_from || date_to) {
-      where.date = {}
-      if (date_from) where.date[Op.gte] = new Date(date_from)
-      if (date_to)   where.date[Op.lte] = new Date(date_to + 'T23:59:59')
-    }
+    // Kun chegarasi mahalliy vaqtda — ilgari `new Date('2026-08-06')`
+    // UTC yarim tuni deb o'qilib, filtr soat 05:00 dan boshlanardi va
+    // tongdagi savdolar tushib qolardi.
+    const dr = dateRange(Op, date_from, date_to)
+    if (dr) where.date = dr
 
     const txns = await CashTransactionModel.findAll({
       where,
