@@ -125,10 +125,15 @@ class ProductController extends BaseController {
           src: idx,
           data: {
             ...it,
-            model: s.size,                       // razmer `model` maydonida saqlanadi
-            // Tartib frontenddagi autoName() bilan bir xil: razmer/model oldinda
-            name: [s.size, it.brand, it.general_name || it.name, it.color]
-              .map(v => (v || '').toString().trim()).filter(Boolean).join(' '),
+            // Model (artikul, masalan "112") va razmer alohida narsalar.
+            // Model kiritilgan bo'lsa saqlanadi va nom boshida turadi;
+            // razmer nom oxiriga qo'shiladi, chunki har razmer alohida
+            // mahsulot bo'lib yaratiladi va ular bir-biridan shu bilan
+            // farqlanadi. Model bo'sh bo'lsa — razmer uning o'rnini oladi.
+            model: (it.model || '').toString().trim() || s.size,
+            name: [
+              it.model, it.brand, it.general_name || it.name, it.color, s.size,
+            ].map(v => (v || '').toString().trim()).filter(Boolean).join(' '),
           },
           qty: Number(s.qty) || 0,
           barcodes: s.barcode ? [s.barcode] : [],
