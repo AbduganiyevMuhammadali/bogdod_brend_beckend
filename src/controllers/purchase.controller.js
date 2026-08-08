@@ -251,7 +251,14 @@ class PurchaseController extends BaseController {
 
     const hasCost   = req.body.cost_price       !== undefined && req.body.cost_price       !== null && req.body.cost_price       !== '';
     const hasRetail = req.body.retail_price_sum !== undefined && req.body.retail_price_sum !== null && req.body.retail_price_sum !== '';
-    if (!hasCost && !hasRetail) throw new HttpException(400, 'Yangilash uchun narx yuborilmadi');
+    // Nom ham shu yerdan tahrirlanadi — tezkor kiritishda xato yozilgan
+    // nomni keyin to'g'rilash uchun
+    const newName   = req.body.product_name !== undefined
+      ? String(req.body.product_name).trim()
+      : null;
+    const hasName   = newName !== null;
+    if (hasName && !newName) throw new HttpException(400, 'Mahsulot nomi bo\'sh bo\'lishi mumkin emas');
+    if (!hasCost && !hasRetail && !hasName) throw new HttpException(400, 'Yangilash uchun ma\'lumot yuborilmadi');
 
     const costPrice   = hasCost   ? Number(req.body.cost_price)       : Number(item.cost_price);
     const retailPrice = hasRetail ? Number(req.body.retail_price_sum) : Number(item.retail_price_sum);
@@ -270,6 +277,7 @@ class PurchaseController extends BaseController {
         itemUpdates.total_cost_sum = costPrice * unitQty;
       }
       if (hasRetail) itemUpdates.retail_price_sum = retailPrice;
+      if (hasName)   itemUpdates.product_name      = newName;
       await item.update(itemUpdates, { transaction: t });
 
       // Hujjat jami summasi qatorlar yig'indisidan qayta hisoblanadi
@@ -298,11 +306,29 @@ class PurchaseController extends BaseController {
         );
       }
 
-      // Mahsulot kartochkasidagi sotuv narxi (tannarx product jadvalida
-      // saqlanmaydi — u har doim partiyadan, ya'ni FIFO orqali olinadi)
-      if (hasRetail && item.product_id) {
+      // Mahsulot kartochkasidagi nom va sotuv narxi (tannarx product
+      // jadvalida saqlanmaydi — u har doim partiyadan, FIFO orqali olinadi)
+      if ((hasRetail || hasName) && item.product_id) {
         const product = await ProductModel.findByPk(item.product_id, { transaction: t });
-        if (product) await product.update({ retail_price: retailPrice }, { transaction: t });
+        if (product) {
+          const productUpdates = {};
+          if (hasRetail) productUpdates.retail_price = retailPrice;
+          if (hasName)   productUpdates.name         = newName;
+          await product.update(productUpdates, { transaction: t });
+        }
+      }
+
+      // Sotuv yozuvlaridagi nom ham yangilanadi — hisobotlarda eski nom
+      // qolib ketmasligi uchun
+      if (hasName && item.product_id) {
+        await ProductRegisterModel.update(
+          { product_name: newName },
+          { where: { product_id: item.product_id }, transaction: t }
+        );
+        await SaleItemModel.update(
+          { product_name: newName },
+          { where: { product_id: item.product_id }, transaction: t }
+        );
       }
 
       // Shu partiyadan sotilgan yozuvlardagi tannarx — foyda hisoboti uchun
