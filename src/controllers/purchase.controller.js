@@ -38,6 +38,7 @@ class PurchaseController extends BaseController {
         { model: PurchaseItemModel, as: 'items', attributes: ['id'] },
         { model: SupplierModel,     as: 'supplierRef', attributes: ['id', 'name', 'balance'] },
         { model: UserModel,         as: 'creator', attributes: ['id', 'fullname', 'username'], required: false },
+        { model: UserModel,         as: 'printer', attributes: ['id', 'fullname', 'username'], required: false },
       ],
       distinct: true,   // items bilan JOIN'da count to'g'ri chiqishi uchun
     });
@@ -48,13 +49,48 @@ class PurchaseController extends BaseController {
     const purchase = await PurchaseModel.findOne({
       where:   { id: req.params.id },
       include: [
-        { model: PurchaseItemModel, as: 'items' },
+        // Mahsulotning joriy modeli/nomi ham keladi — tarixda va yorliqda
+        // model ko'rsatish uchun. `product_name` saqlangan paytdagi nom,
+        // u eski hujjatlarda modelsiz bo'lishi mumkin.
+        {
+          model: PurchaseItemModel, as: 'items',
+          include: [{
+            model: ProductModel, as: 'product', required: false,
+            attributes: ['id', 'name', 'model', 'brand', 'general_name', 'color'],
+          }],
+        },
         { model: SupplierModel,     as: 'supplierRef', attributes: ['id', 'name', 'balance'] },
         { model: UserModel,         as: 'creator', attributes: ['id', 'fullname', 'username'], required: false },
+        { model: UserModel,         as: 'printer', attributes: ['id', 'fullname', 'username'], required: false },
       ],
     });
     if (!purchase) throw new HttpException(404, req.mf('data not found'));
     res.json(purchase);
+  };
+
+  // Yorliqlar chop etilganini belgilash. Tarixda qaysi hujjatga yorliq
+  // bosilgani ko'rinib tursin — aks holda qayta chop etib, ortiqcha
+  // yorliq sarflanadi yoki aksincha, chop etilmagani e'tibordan qoladi.
+  markLabelsPrinted = async (req, res) => {
+    const purchase = await PurchaseModel.findByPk(req.params.id);
+    if (!purchase) throw new HttpException(404, req.mf('data not found'));
+
+    // `printed: false` yuborilsa belgi olib tashlanadi — noto'g'ri
+    // bosilgan bo'lsa qaytarish uchun
+    const printed = req.body?.printed !== false;
+
+    await purchase.update({
+      labels_printed_at: printed ? new Date() : null,
+      labels_printed_by: printed ? (req.currentUser?.id ?? null) : null,
+    });
+
+    const fresh = await PurchaseModel.findOne({
+      where: { id: purchase.id },
+      include: [
+        { model: UserModel, as: 'printer', attributes: ['id', 'fullname', 'username'], required: false },
+      ],
+    });
+    res.json(fresh);
   };
 
   getNextDocNumber = async (req, res) => {

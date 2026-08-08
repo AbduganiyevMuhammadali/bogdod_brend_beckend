@@ -14,6 +14,7 @@ router.post('/',             auth(), perm('purchases', 'qoshish'), awaitHF(ctrl.
 router.put('/:id',           auth(), perm('purchases', 'tahrir'),  awaitHF(ctrl.update));
 router.patch('/:id/items/:itemId/prices', auth(), perm('purchases', 'tahrir'), awaitHF(ctrl.updateItemPrices));
 router.post('/:id/confirm',  auth(), perm('purchases', 'qoshish'), awaitHF(ctrl.confirm));
+router.post('/:id/labels-printed', auth(), awaitHF(ctrl.markLabelsPrinted));
 router.post('/:id/cancel',   auth(), perm('purchases', 'tahrir'),  awaitHF(ctrl.cancel));
 router.delete('/:id',        auth(), perm('purchases', 'tahrir'),  awaitHF(ctrl.delete));
 

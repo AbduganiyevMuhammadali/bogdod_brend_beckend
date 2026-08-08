@@ -30,6 +30,8 @@ CashTransactionModel.belongsTo(ClientModel, { foreignKey: 'client_id', as: 'clie
 
 // Purchase ↔ User (kim yaratgan) — tezkor kiritish tarixida ko'rsatiladi
 PurchaseModel.belongsTo(UserModel, { foreignKey: 'created_by', as: 'creator' })
+// Yorliqni kim chop etgan
+PurchaseModel.belongsTo(UserModel, { foreignKey: 'labels_printed_by', as: 'printer' })
 
 // Purchase ↔ Supplier
 PurchaseModel.belongsTo(SupplierModel, { foreignKey: 'supplier_id', as: 'supplierRef' })

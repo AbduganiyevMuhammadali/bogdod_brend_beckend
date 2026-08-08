@@ -11,6 +11,10 @@ module.exports = async function(){
         ['product_register', 'purchase_item_id',   'INT NULL DEFAULT NULL'],
         ['purchase',         'supplier_id',        'INT NULL DEFAULT NULL'],
         ['purchase',         'paid_sum',           'DECIMAL(18,2) NOT NULL DEFAULT 0'],
+        // Yorliqlar chop etilganmi — tezkor kiritish tarixida ko'rsatiladi,
+        // shunda qaysi hujjatga yorliq bosilgani esdan chiqmaydi
+        ['purchase',         'labels_printed_at',  'DATETIME NULL DEFAULT NULL'],
+        ['purchase',         'labels_printed_by',  'INT NULL DEFAULT NULL'],
         // USD / exchange_rate columns
         ['sale',             'exchange_rate',      'DECIMAL(12,2) NOT NULL DEFAULT 0'],
         ['sale',             'total_usd',          'DECIMAL(15,4) NOT NULL DEFAULT 0'],

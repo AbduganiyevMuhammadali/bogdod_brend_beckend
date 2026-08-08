@@ -20,6 +20,9 @@ PurchaseModel.init({
   paid_sum:     { type: DataTypes.DECIMAL(18, 2), defaultValue: 0 },
   supplier_id:  { type: DataTypes.INTEGER,      allowNull: true },
   created_by:   { type: DataTypes.INTEGER,      allowNull: true },
+  // Yorliqlar oxirgi marta qachon va kim tomonidan chop etilgan
+  labels_printed_at: { type: DataTypes.DATE,    allowNull: true },
+  labels_printed_by: { type: DataTypes.INTEGER, allowNull: true },
 }, {
   sequelize,
   modelName: 'PurchaseModel',
