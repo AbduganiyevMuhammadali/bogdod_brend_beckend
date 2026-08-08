@@ -285,6 +285,24 @@ class ProductController extends BaseController {
     res.json(rows.map(r => r.category));
   };
 
+  // Bazada mavjud brendlar — tezkor kiritishda taklif sifatida ishlatiladi.
+  // Shunda boshqa kompyuterda kiritilgan brend ham taklifga tushadi.
+  // Ko'p ishlatilgani oldinda turadi.
+  getBrands = async (req, res) => {
+    const rows = await ProductModel.findAll({
+      attributes: [
+        'brand',
+        [ProductModel.sequelize.fn('COUNT', ProductModel.sequelize.col('id')), 'n'],
+      ],
+      where: { brand: { [Op.ne]: null, [Op.ne]: '' } },
+      group: ['brand'],
+      order: [[ProductModel.sequelize.literal('n'), 'DESC']],
+      limit: 100,
+      raw: true,
+    });
+    res.json(rows.map(r => r.brand).filter(Boolean));
+  };
+
   // Kam qolgan tovarlar soni (sidebar badge uchun)
   getLowStockCount = async (req, res) => {
     const { literal } = require('sequelize');
