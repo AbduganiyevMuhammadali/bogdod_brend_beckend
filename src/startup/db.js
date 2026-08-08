@@ -109,6 +109,53 @@ module.exports = async function(){
             console.log(`${table}.${name} indeksi qoshildi`);
         } catch { /* already exists */ }
     }
+
+    // Bir martalik tuzatishlar. Bajarilgani `app_setting` da belgilanadi —
+    // aks holda har server ishga tushganda takrorlanib, foydalanuvchi qo'lda
+    // o'zgartirgan holatni bekor qilib yuborardi.
+    await runOnce(db, 'backfill_labels_printed_v1', async () => {
+        // Bu funksiya qo'shilgunga qadar yaratilgan tezkor kiritish
+        // hujjatlariga yorliq allaqachon chop etilgan deb hisoblaymiz —
+        // amalda ular bosilib, tovarga yopishtirilgan.
+        const [res] = await db.query(`
+          UPDATE \`purchase\`
+             SET \`labels_printed_at\` = \`date\`,
+                 \`labels_printed_by\` = \`created_by\`
+           WHERE \`comment\` LIKE '%qoldiq%'
+             AND \`labels_printed_at\` IS NULL
+        `);
+        console.log(`labels_printed belgilandi: ${res?.affectedRows ?? 0} ta hujjat`);
+    });
+}
+
+// Bir martalik vazifani bajaradi va bajarilganini yozib qo'yadi
+async function runOnce(db, key, fn) {
+    try {
+        await db.query(`
+          CREATE TABLE IF NOT EXISTS \`app_setting\` (
+            \`id\`         INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            \`key\`        VARCHAR(100) NOT NULL UNIQUE,
+            \`value\`      TEXT DEFAULT NULL,
+            \`created_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            \`updated_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        `);
+
+        const [rows] = await db.query(
+          'SELECT `value` FROM `app_setting` WHERE `key` = ? LIMIT 1', { replacements: [key] }
+        );
+        if (rows.length) return;          // allaqachon bajarilgan
+
+        await fn();
+
+        await db.query(
+          'INSERT INTO `app_setting` (`key`, `value`) VALUES (?, ?)',
+          { replacements: [key, new Date().toISOString()] }
+        );
+    } catch (e) {
+        // Bir martalik tuzatish yiqilsa ham server ishga tushaversin
+        console.log(`runOnce(${key}) xatolik:`, e.message);
+    }
     // .catch(err => { Global exception hadler borligi uchun
     //     console.error('Baza bilan aloqa uzildi xatolik ->:', err);
     // });
