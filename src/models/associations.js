@@ -8,6 +8,7 @@ const CashTransactionModel  = require('./cash_transaction.model')
 const SupplierModel         = require('./supplier.model')
 const InventoryModel        = require('./inventory.model')
 const InventoryItemModel    = require('./inventory_item.model')
+const UserModel             = require('./user.model')
 
 // Sale ↔ SaleItem
 SaleModel.hasMany(SaleItemModel,   { foreignKey: 'sale_id',     as: 'items'    })
@@ -26,6 +27,9 @@ ProductModel.hasMany(PurchaseItemModel,   { foreignKey: 'product_id', as: 'batch
 
 // CashTransaction ↔ Client
 CashTransactionModel.belongsTo(ClientModel, { foreignKey: 'client_id', as: 'client' })
+
+// Purchase ↔ User (kim yaratgan) — tezkor kiritish tarixida ko'rsatiladi
+PurchaseModel.belongsTo(UserModel, { foreignKey: 'created_by', as: 'creator' })
 
 // Purchase ↔ Supplier
 PurchaseModel.belongsTo(SupplierModel, { foreignKey: 'supplier_id', as: 'supplierRef' })

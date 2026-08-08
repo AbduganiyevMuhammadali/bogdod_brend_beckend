@@ -6,16 +6,21 @@ const ProductModel         = require('../models/product.model');
 const SaleItemModel        = require('../models/sale_item.model');
 const ProductRegisterModel = require('../models/product_register.model');
 const SupplierModel        = require('../models/supplier.model');
+const UserModel            = require('../models/user.model');
 const HttpException        = require('../utils/HttpException.utils');
 const BaseController       = require('./BaseController');
 
 class PurchaseController extends BaseController {
 
   getAll = async (req, res) => {
-    const { search, status, warehouse, page = 1, limit = 50 } = req.query;
+    const { search, status, warehouse, comment, page = 1, limit = 50 } = req.query;
     const where = {};
     if (status    && status    !== 'all') where.status    = status;
     if (warehouse && warehouse !== 'all') where.warehouse = warehouse;
+    // Izoh bo'yicha filtr — tezkor kiritish tarixi faqat "Boshlang'ich
+    // qoldiq" hujjatlarini so'raydi. Ilgari hamma hujjat yuborilib,
+    // brauzerda filtrlanardi: 200+ hujjatda bu sezilarli kechikish berardi.
+    if (comment) where.comment = { [Op.like]: `%${comment}%` };
     if (search) {
       where[Op.or] = [
         { supplier:   { [Op.like]: `%${search}%` } },
@@ -28,10 +33,13 @@ class PurchaseController extends BaseController {
       order:  [['date', 'DESC'], ['id', 'DESC']],
       limit:  Number(limit),
       offset,
+      // `items` faqat sanash uchun kerak — butun qatorlarni tortmaymiz
       include: [
         { model: PurchaseItemModel, as: 'items', attributes: ['id'] },
         { model: SupplierModel,     as: 'supplierRef', attributes: ['id', 'name', 'balance'] },
+        { model: UserModel,         as: 'creator', attributes: ['id', 'fullname', 'username'], required: false },
       ],
+      distinct: true,   // items bilan JOIN'da count to'g'ri chiqishi uchun
     });
     res.json({ total: count, page: Number(page), data: rows });
   };
@@ -42,6 +50,7 @@ class PurchaseController extends BaseController {
       include: [
         { model: PurchaseItemModel, as: 'items' },
         { model: SupplierModel,     as: 'supplierRef', attributes: ['id', 'name', 'balance'] },
+        { model: UserModel,         as: 'creator', attributes: ['id', 'fullname', 'username'], required: false },
       ],
     });
     if (!purchase) throw new HttpException(404, req.mf('data not found'));
