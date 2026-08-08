@@ -126,8 +126,7 @@ class ProductController extends BaseController {
           data: {
             ...it,
             model: s.size,                       // razmer `model` maydonida saqlanadi
-            // Tartib frontenddagi autoName() bilan bir xil: razmer/model oldinda
-            name: [s.size, it.brand, it.general_name || it.name, it.color]
+            name: [it.brand, it.general_name || it.name, s.size, it.color]
               .map(v => (v || '').toString().trim()).filter(Boolean).join(' '),
           },
           qty: Number(s.qty) || 0,
