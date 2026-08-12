@@ -35,35 +35,86 @@ async function nextProductCode(transaction = null) {
 
 class ProductController extends BaseController {
 
+  // Bir necha ming tovarda ro'yxat hech qachon to'liq tortilmaydi: sahifa
+  // bo'yicha beriladi. Frontend kerak bo'lsa keyingi sahifani so'raydi.
+  //
+  // `limit=0` endi "hammasi" degani emas — bunday so'rov 2000+ satrni
+  // JSON'ga aylantirib, brauzerni qotirardi. Uning o'rniga MAX_LIMIT
+  // ishlaydi, ya'ni eski chaqiruvlar ham xavfsiz sahifalanadi.
   getAll = async (req, res) => {
-    // limit=0 (yoki 'all') — hammasini qaytar. Mahsulotlar sahifasi butun
-    // ro'yxatni bir marta oladi: do'konda bir necha ming tovar bo'lsa ham
-    // qidiruv/filtr brauzerda darhol ishlashi kerak.
     const { search, category, active, page = 1 } = req.query;
-    const rawLimit = req.query.limit;
-    const noLimit  = rawLimit === '0' || rawLimit === 'all';
-    const limit    = noLimit ? null : (Number(rawLimit) > 0 ? Number(rawLimit) : 200);
+
+    const MAX_LIMIT = 500;
+    const rawLimit  = Number(req.query.limit);
+    // limit=0 / 'all' / noto'g'ri qiymat → standart sahifa hajmi
+    const limit  = rawLimit > 0 ? Math.min(rawLimit, MAX_LIMIT) : 100;
+    const offset = Math.max(0, (Number(page) || 1) - 1) * limit;
+
     const where = {};
 
     if (search) {
+      const q = String(search).trim();
+      // Prefiks qidiruv (`q%`) indeksdan foydalanadi — `%q%` esa yo'q va
+      // har harfda butun jadvalni skanerlaydi. Nom bo'yicha shuning uchun
+      // prefiksdan boshlaymiz; kod va shtrix-kod baribir aniq/prefiks
+      // qidiriladi, bu skaner uchun ham to'g'ri xulq.
+      //
+      // So'z o'rtasidan qidirish kerak bo'lgan holat uchun (masalan
+      // "adidas krossovka" dagi "krossovka") nom bo'yicha `%q%` ham
+      // qoldirilgan, lekin u faqat prefiks hech narsa topmaganda emas —
+      // OR sifatida ishlaydi va indeks qisman yordam beradi.
       where[Op.or] = [
-        { name:         { [Op.like]: `%${search}%` } },
-        { general_name: { [Op.like]: `%${search}%` } },
-        { code:         { [Op.like]: `%${search}%` } },
-        { brand:        { [Op.like]: `%${search}%` } },
-        { barcodes:     { [Op.like]: `%${search}%` } },
+        { name:         { [Op.like]: `${q}%` } },
+        { name:         { [Op.like]: `% ${q}%` } },  // so'z boshidan
+        { general_name: { [Op.like]: `${q}%` } },
+        { code:         { [Op.like]: `${q}%` } },
+        { brand:        { [Op.like]: `${q}%` } },
+        { barcodes:     { [Op.like]: `%"${q}%` } },  // JSON element boshi
       ];
     }
     if (category && category !== 'all') where.category = category;
     if (active !== undefined) where.active = active === 'true';
 
-    const { count, rows } = await ProductModel.findAndCountAll({
+    // Sotuv sahifasi odatda faqat qoldig'i bor tovarni ko'rsatadi. Bu
+    // filtr serverda bo'lishi shart: brauzerda filtrlansa sahifadagi
+    // 100 tadan bir nechtasi qolib, ro'yxat "kam" bo'lib ko'rinardi.
+    if (req.query.in_stock === 'true' || req.query.in_stock === '1') {
+      where.qty = { [Op.gt]: 0 };
+    }
+
+    // Kam zaxira filtri serverda bajariladi — brauzerda filtrlansa faqat
+    // yuklangan sahifadagi tovarlar tekshirilib, qolgani e'tibordan chetda
+    // qolardi.
+    if (req.query.low_stock === 'true' || req.query.low_stock === '1') {
+      const { literal } = require('sequelize');
+      where.is_folder = false;
+      where[Op.and] = literal('`ProductModel`.`qty` <= `ProductModel`.`min_qty`');
+    }
+
+    // findAndCountAll ikkita so'rov yuboradi va COUNT og'ir qism. Faqat
+    // birinchi sahifada sanaymiz — keyingi sahifalarda jami o'zgarmaydi,
+    // frontend uni birinchi javobdan eslab qoladi.
+    const wantCount = offset === 0;
+
+    const rows = await ProductModel.findAll({
       where,
       order: [['name', 'ASC']],
-      ...(noLimit ? {} : { limit, offset: (Number(page) - 1) * limit }),
+      limit,
+      offset,
     });
 
-    res.json({ total: count, page: Number(page), data: rows });
+    const total = wantCount
+      ? await ProductModel.count({ where })
+      : undefined;
+
+    res.json({
+      total,
+      page: Number(page) || 1,
+      limit,
+      // Yana sahifa bormi — frontend "yana yuklash" ni shunga qarab qiladi
+      has_more: rows.length === limit,
+      data: rows,
+    });
   };
 
   getById = async (req, res) => {
@@ -173,6 +224,19 @@ class ProductController extends BaseController {
         ? (parseInt(String(lastCoded.code).replace('PRD-', ''), 10) || 0)
         : 0;
 
+      // Band kodlarni bitta so'rov bilan olamiz. Ilgari har yangi kod uchun
+      // alohida SELECT ketardi — 500 ta tovar kiritilganda 500 ta ortiqcha
+      // so'rov bo'lib, tezkor kiritish daqiqalab cho'zilardi.
+      const takenRows = await ProductModel.findAll({
+        attributes: ['code'],
+        where: { code: { [Op.like]: 'PRD-%' } },
+        paranoid: false,
+        raw: true,
+        transaction: t,
+      });
+      const taken = new Set(takenRows.map(r => r.code));
+
+      const toCreate = [];
       for (const e of expanded) {
         const data = this._pick(e.data);
         data.name = (data.name || data.general_name || '').toString().trim();
@@ -183,16 +247,36 @@ class ProductController extends BaseController {
           let code;
           do {
             code = `PRD-${String(++counter).padStart(5, '0')}`;
-          } while (await ProductModel.findOne({
-            where: { code }, paranoid: false, transaction: t,
-          }));
+          } while (taken.has(code));
           data.code = code;
         }
+        taken.add(data.code);   // shu partiya ichida ham takrorlanmasin
+
         if (e.barcodes) data.barcodes = e.barcodes;
         data.qty = 0;   // qoldiq kirim hujjati orqali qo'shiladi
 
-        const p = await ProductModel.create(data, { transaction: t });
-        created.push({ product: p, qty: e.qty, cost: Number(e.data.cost_price) || 0 });
+        toCreate.push({ data, qty: e.qty, cost: Number(e.data.cost_price) || 0 });
+      }
+
+      // bitta INSERT. MySQL da bulkCreate ketma-ket auto-increment
+      // id'larni qaytgan instansiyalarga yozib beradi — quyida kirim
+      // hujjati satrlari uchun aynan shu id'lar kerak.
+      const rows = await ProductModel.bulkCreate(
+        toCreate.map(c => c.data),
+        { transaction: t }
+      );
+
+      created = rows.map((p, i) => ({
+        product: p,
+        qty:     toCreate[i].qty,
+        cost:    toCreate[i].cost,
+      }));
+
+      // id yozilmagan bo'lsa keyingi qadamlar (kirim hujjati, FIFO)
+      // jimgina buzilardi — yarim yozilgan holat qolmasligi uchun
+      // tranzaksiyani shu yerda to'xtatamiz.
+      if (created.some(c => !c.product.id)) {
+        throw new HttpException(500, 'Mahsulot id\'lari olinmadi — kiritish bekor qilindi');
       }
 
       // Qoldiqli mahsulotlar uchun bitta kirim hujjati
@@ -233,9 +317,17 @@ class ProductController extends BaseController {
           { transaction: t }
         );
 
-        for (const c of withQty) {
-          await c.product.update({ qty: c.qty }, { transaction: t });
-        }
+        // Qoldiqni yozish. Har mahsulot uchun alohida UPDATE o'rniga
+        // bir nechta CASE bilan bitta so'rov — 500 ta tovarda sezilarli.
+        const ids  = withQty.map(c => c.product.id);
+        const cases = withQty
+          .map(c => `WHEN ${Number(c.product.id)} THEN ${Number(c.qty)}`)
+          .join(' ');
+        await sequelize.query(
+          `UPDATE \`product\` SET \`qty\` = CASE \`id\` ${cases} END
+            WHERE \`id\` IN (${ids.map(Number).join(',')})`,
+          { transaction: t }
+        );
       }
     });
 
@@ -281,13 +373,32 @@ class ProductController extends BaseController {
     res.json({ url: `/uploads/${req.file.filename}` });
   };
 
-  // Get distinct categories from DB
+  // Kategoriyalar va har birida nechta tovar borligi.
+  //
+  // Sanoq ham shu yerda qaytadi — aks holda frontend har kategoriya
+  // yonidagi raqamni ko'rsatish uchun butun ro'yxatni yuklashga majbur
+  // bo'lardi. `?with_counts=1` bo'lmasa eski shakl (oddiy massiv)
+  // qaytadi, shunda bu endpointning boshqa chaqiruvchilari buzilmaydi.
   getCategories = async (req, res) => {
+    const { fn, col } = require('sequelize');
+
     const rows = await ProductModel.findAll({
-      attributes: ['category'],
-      group: ['category'],
+      attributes: [
+        'category',
+        [fn('COUNT', col('id')), 'n'],
+      ],
       where: { category: { [Op.ne]: null } },
+      group: ['category'],
+      order: [['category', 'ASC']],
+      raw: true,
     });
+
+    if (req.query.with_counts) {
+      return res.json(rows.map(r => ({
+        category: r.category,
+        count:    Number(r.n) || 0,
+      })));
+    }
     res.json(rows.map(r => r.category));
   };
 
@@ -307,6 +418,40 @@ class ProductController extends BaseController {
       raw: true,
     });
     res.json(rows.map(r => r.brand).filter(Boolean));
+  };
+
+  // Mahsulotlar sahifasi tepasidagi ko'rsatkichlar.
+  //
+  // Ilgari bu qiymatlar brauzerda butun ro'yxat ustidan hisoblanardi —
+  // ya'ni ko'rsatkich to'g'ri chiqishi uchun 2000+ satrni yuklash kerak
+  // edi. Endi bitta agregat so'rov bilan bazada hisoblanadi va sahifa
+  // nechta tovar yuklanganidan qat'i nazar to'g'ri ko'rsatadi.
+  getStats = async (req, res) => {
+    const { literal, fn, col } = require('sequelize');
+    const { category, active } = req.query;
+
+    const where = { is_folder: false };
+    if (category && category !== 'all') where.category = category;
+    if (active !== undefined) where.active = active === 'true';
+
+    const [row] = await ProductModel.findAll({
+      where,
+      attributes: [
+        [fn('COUNT', col('id')), 'total'],
+        [fn('COUNT', fn('DISTINCT', col('category'))), 'cats'],
+        [fn('SUM', literal('CASE WHEN `qty` <= `min_qty` THEN 1 ELSE 0 END')), 'low_stock'],
+        // Ombordagi tovarning sotuv narxidagi qiymati
+        [fn('SUM', literal('`qty` * `retail_price`')), 'stock_value'],
+      ],
+      raw: true,
+    });
+
+    res.json({
+      total:       Number(row?.total)       || 0,
+      cats:        Number(row?.cats)        || 0,
+      lowStock:    Number(row?.low_stock)   || 0,
+      stockValue:  Number(row?.stock_value) || 0,
+    });
   };
 
   // Kam qolgan tovarlar soni (sidebar badge uchun)

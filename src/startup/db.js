@@ -95,7 +95,20 @@ module.exports = async function(){
     const indexes = [
         ['product',          'idx_product_name',      '(`name`)'],
         ['product',          'idx_product_active',    '(`active`)'],
+        // Mahsulotlar sahifasi doim `name` bo'yicha saralaydi va ko'pincha
+        // kategoriya bo'yicha filtrlaydi. Birgalikda indeks bo'lmasa MySQL
+        // filtrlangan satrlarni alohida saralashga majbur (filesort).
+        ['product',          'idx_product_cat_name',  '(`category`, `name`)'],
+        ['product',          'idx_product_active_name','(`active`, `is_folder`, `name`)'],
+        // Kod/brend bo'yicha prefiks qidiruv uchun
+        ['product',          'idx_product_code',      '(`code`)'],
+        ['product',          'idx_product_brand',     '(`brand`)'],
+        // Kam qolgan tovar sanog'i (sidebar badge) har sahifada chaqiriladi
+        ['product',          'idx_product_lowstock',  '(`active`, `is_folder`, `min_qty`)'],
         ['purchase_item',    'idx_pi_prod_sold',      '(`product_id`, `sold_qty`)'],
+        // FIFO: ochiq partiyani eng eskisidan qidirish
+        ['purchase_item',    'idx_pi_prod_stock',     '(`product_id`, `stock_qty`, `id`)'],
+        ['product_register', 'idx_pr_sale',           '(`sale_id`)'],
         ['sale',             'idx_sale_date',         '(`date`)'],
         ['sale_item',        'idx_si_sale',           '(`sale_id`)'],
         ['kassa_register',   'idx_kr_date',           '(`date`)'],

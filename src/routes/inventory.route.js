@@ -14,6 +14,8 @@ router.post('/',       auth(), perm('products', 'qoshish'), awaitHF(ctrl.create)
 router.post('/:id/scan',   auth(), perm('products', 'tahrir'), awaitHF(ctrl.scan));
 router.post('/:id/finish', auth(), perm('products', 'tahrir'), awaitHF(ctrl.finish));
 router.post('/:id/cancel', auth(), perm('products', 'tahrir'), awaitHF(ctrl.cancel));
+// Yakunlashni qaytarish — noto'g'ri yakunlangan sanoqdan keyin qoldiqni tiklaydi
+router.post('/:id/rollback', auth(), perm('products', 'tahrir'), awaitHF(ctrl.rollback));
 
 router.patch('/items/:itemId',  auth(), perm('products', 'tahrir'), awaitHF(ctrl.updateItem));
 router.delete('/items/:itemId', auth(), perm('products', 'tahrir'), awaitHF(ctrl.deleteItem));

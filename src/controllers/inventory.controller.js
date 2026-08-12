@@ -19,6 +19,45 @@ async function currentCost(productId, transaction) {
   return Number(batch?.cost_price) || 0;
 }
 
+// Ko'p mahsulotning tannarxini bitta so'rov bilan oladi.
+//
+// currentCost() ni ro'yxat ustida aylantirsak, 2000 tovarli omborda 2000 ta
+// so'rov ketadi va inventarizatsiya ochilishi daqiqalab cho'ziladi. Bu yerda
+// har mahsulot uchun eng kichik id'li ochiq partiya bitta guruhlangan
+// so'rovda topiladi.
+async function costMap(productIds, transaction) {
+  const map = new Map();
+  if (!productIds.length) return map;
+
+  // IN(...) ro'yxati juda uzayib ketmasligi uchun bo'lib so'raymiz
+  const CHUNK = 1000;
+  for (let i = 0; i < productIds.length; i += CHUNK) {
+    const ids = productIds.slice(i, i + CHUNK);
+
+    // Eng eski ochiq partiyaning id'si (mahsulot kesimida)
+    const firsts = await PurchaseItemModel.findAll({
+      attributes: [
+        'product_id',
+        [sequelize.fn('MIN', sequelize.col('id')), 'first_id'],
+      ],
+      where: { product_id: { [Op.in]: ids }, stock_qty: { [Op.gt]: 0 } },
+      group: ['product_id'],
+      raw: true,
+      transaction,
+    });
+    if (!firsts.length) continue;
+
+    const rows = await PurchaseItemModel.findAll({
+      attributes: ['id', 'product_id', 'cost_price'],
+      where: { id: { [Op.in]: firsts.map(f => f.first_id) } },
+      raw: true,
+      transaction,
+    });
+    rows.forEach(r => map.set(r.product_id, Number(r.cost_price) || 0));
+  }
+  return map;
+}
+
 class InventoryController extends BaseController {
 
   getAll = async (req, res) => {
@@ -53,8 +92,16 @@ class InventoryController extends BaseController {
     const where = { active: true, is_folder: false };
     if (only_in_stock) where.qty = { [Op.gt]: 0 };
 
-    const products = await ProductModel.findAll({ where, order: [['name', 'ASC']] });
+    // Faqat kerakli ustunlar — 2000+ tovarda butun satrni tortish ortiqcha
+    const products = await ProductModel.findAll({
+      where,
+      attributes: ['id', 'name', 'barcodes', 'qty'],
+      order: [['name', 'ASC']],
+    });
     if (!products.length) throw new HttpException(400, 'Omborda mahsulot topilmadi');
+
+    // Barcha tannarxlar bitta so'rovda — har mahsulot uchun alohida emas
+    const costs = await costMap(products.map(p => p.id), null);
 
     let doc;
     await sequelize.transaction(async (t) => {
@@ -68,19 +115,22 @@ class InventoryController extends BaseController {
         created_by: req.currentUser?.id ?? null,
       }, { transaction: t });
 
-      const rows = [];
-      for (const p of products) {
-        rows.push({
-          inventory_id: doc.id,
-          product_id:   p.id,
-          product_name: p.name,
-          barcode:      (p.barcodes || [])[0] || null,
-          expected_qty: Number(p.qty) || 0,
-          counted_qty:  0,
-          cost_price:   await currentCost(p.id, t),
-        });
+      const rows = products.map(p => ({
+        inventory_id: doc.id,
+        product_id:   p.id,
+        product_name: p.name,
+        barcode:      (p.barcodes || [])[0] || null,
+        expected_qty: Number(p.qty) || 0,
+        counted_qty:  0,
+        cost_price:   costs.get(p.id) || 0,
+      }));
+
+      // Bir necha ming satrni bitta INSERT ga tiqmaymiz — MySQL
+      // max_allowed_packet chegarasiga urilmaslik uchun bo'lib yozamiz
+      const CHUNK = 500;
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        await InventoryItemModel.bulkCreate(rows.slice(i, i + CHUNK), { transaction: t });
       }
-      await InventoryItemModel.bulkCreate(rows, { transaction: t });
     });
 
     const full = await InventoryModel.findOne({
@@ -110,9 +160,16 @@ class InventoryController extends BaseController {
 
     // 2) Topilmasa — bazadagi mahsulotlar orasidan (barcodes JSON ichida)
     if (!item) {
-      const product = await ProductModel.findOne({
-        where: { barcodes: { [Op.like]: `%${code}%` } },
+      // JSON massiv ichida to'liq element sifatida mos kelishi kerak.
+      // `%code%` bo'lsa, skanerlangan kod boshqa tovarning shtrix-kodi
+      // ichiga kirib qolsa noto'g'ri tovar topilardi.
+      const candidates = await ProductModel.findAll({
+        where: { barcodes: { [Op.like]: `%"${code}"%` } },
+        limit: 5,
       });
+      const product = candidates.find(
+        p => Array.isArray(p.barcodes) && p.barcodes.includes(code)
+      ) || null;
 
       if (product) {
         // Hujjatda shu mahsulot satri bormi (boshqa shtrix-kod bilan)
@@ -214,6 +271,35 @@ class InventoryController extends BaseController {
     let totalExpected = 0, totalCounted = 0, totalDiffSum = 0;
 
     await sequelize.transaction(async (t) => {
+      // Mahsulotlar va partiyalarni oldindan bitta so'rovda olamiz.
+      // Ilgari har satr uchun 2 ta so'rov ketardi — 2000 satrli hujjatda
+      // 4000 so'rov bo'lib, yakunlash tranzaksiyasi juda uzoq ochiq turardi.
+      const itemProductIds = [...new Set(
+        doc.items.map(i => i.product_id).filter(Boolean)
+      )];
+
+      const productList = itemProductIds.length
+        ? await ProductModel.findAll({
+            where: { id: { [Op.in]: itemProductIds } }, transaction: t,
+          })
+        : [];
+      const productById = new Map(productList.map(p => [p.id, p]));
+
+      const allBatches = itemProductIds.length
+        ? await PurchaseItemModel.findAll({
+            where: { product_id: { [Op.in]: itemProductIds } },
+            order: [['id', 'ASC']], transaction: t,
+          })
+        : [];
+      const batchesByProduct = new Map();
+      for (const b of allBatches) {
+        if (!batchesByProduct.has(b.product_id)) batchesByProduct.set(b.product_id, []);
+        batchesByProduct.get(b.product_id).push(b);
+      }
+
+      // Mahsulot qoldiqlarini oxirida bitta so'rovda yozamiz
+      const qtyUpdates = [];
+
       for (const item of doc.items) {
         const expected = Number(item.expected_qty) || 0;
         const counted  = Number(item.counted_qty)  || 0;
@@ -227,12 +313,10 @@ class InventoryController extends BaseController {
         // to'g'ri, lekin partiyalar yig'indisi undan farq qilishi mumkin
         if (!item.product_id) continue;
 
-        const product = await ProductModel.findOne({
-          where: { id: item.product_id }, transaction: t,
-        });
+        const product = productById.get(item.product_id);
         if (!product) continue;
 
-        await product.update({ qty: counted }, { transaction: t });
+        qtyUpdates.push({ id: product.id, qty: counted });
 
         // FIFO partiyalarini sanalgan miqdorga tenglashtiramiz.
         //
@@ -240,10 +324,7 @@ class InventoryController extends BaseController {
         // mumkin (eski nomuvofiqliklar sababli), shuning uchun diff dan
         // emas, partiyalar yig'indisidan kelib chiqamiz — aks holda
         // inventarizatsiyadan keyin ham nomuvofiqlik saqlanib qoladi.
-        const batches = await PurchaseItemModel.findAll({
-          where: { product_id: product.id },
-          order: [['id', 'ASC']], transaction: t,
-        });
+        const batches = batchesByProduct.get(product.id) || [];
 
         const batchTotal = batches.reduce((a, b) => a + (Number(b.stock_qty) || 0), 0);
 
@@ -302,6 +383,19 @@ class InventoryController extends BaseController {
         }
       }
 
+      // Sanalgan qoldiqlarni yozamiz — har mahsulot uchun alohida UPDATE
+      // o'rniga CASE bilan bo'lakma-bo'lak
+      const CHUNK = 500;
+      for (let i = 0; i < qtyUpdates.length; i += CHUNK) {
+        const part  = qtyUpdates.slice(i, i + CHUNK);
+        const cases = part.map(u => `WHEN ${Number(u.id)} THEN ${Number(u.qty)}`).join(' ');
+        const ids   = part.map(u => Number(u.id)).join(',');
+        await sequelize.query(
+          `UPDATE \`product\` SET \`qty\` = CASE \`id\` ${cases} END WHERE \`id\` IN (${ids})`,
+          { transaction: t }
+        );
+      }
+
       await doc.update({
         status: 'finished',
         finished_at: new Date(),
@@ -316,6 +410,160 @@ class InventoryController extends BaseController {
       include: [{ model: InventoryItemModel, as: 'items' }],
     });
     res.json(full);
+  };
+
+  // Yakunlashni QAYTARISH (rollback).
+  //
+  // Sanoq tugallanmagan holda "Yakunlash" bosilsa, skanerlanmagan
+  // tovarlarning qoldig'i 0 ga tushib qoladi. Bu metod ularni hujjat
+  // ochilgandagi holatga qaytaradi.
+  //
+  // Qaytarish mumkin, chunki hujjat ochilganda har tovarning o'sha
+  // paytdagi qoldig'i `inventory_item.expected_qty` ga yozilgan va
+  // yakunlash uni O'ZGARTIRMAYDI — faqat o'qiydi.
+  //
+  // DIQQAT: hujjat o'chirilsa `inventory_item` ham o'chadi va qaytarish
+  // imkoni yo'qoladi. Shuning uchun o'chirish emas, shu metod ishlatiladi.
+  rollback = async (req, res) => {
+    const doc = await InventoryModel.findOne({
+      where: { id: req.params.id },
+      include: [{ model: InventoryItemModel, as: 'items' }],
+    });
+    if (!doc) throw new HttpException(404, 'Hujjat topilmadi');
+    if (doc.status !== 'finished') {
+      throw new HttpException(400, 'Faqat yakunlangan hujjatni qaytarish mumkin');
+    }
+
+    const real = doc.items.filter(i => i.product_id);
+    if (!real.length) throw new HttpException(400, 'Qaytariladigan satr topilmadi');
+
+    const ids = [...new Set(real.map(i => i.product_id))];
+
+    // Yakunlashdan KEYIN sotilgan tovarlar. Ularni hisobga olmasak,
+    // sotilgan tovar qoldiqqa qayta qo'shilib, yo'q narsa bor bo'lib
+    // ko'rinadi.
+    let soldAfter = new Map();
+    if (doc.finished_at) {
+      const SaleItemModel = require('../models/sale_item.model');
+      const SaleModel     = require('../models/sale.model');
+      const sold = await SaleItemModel.findAll({
+        attributes: [
+          'product_id',
+          [sequelize.fn('SUM', sequelize.col('SaleItemModel.qty')), 'q'],
+        ],
+        where: { product_id: { [Op.in]: ids } },
+        include: [{
+          model: SaleModel,
+          as: 'sale',
+          attributes: [],
+          required: true,
+          where: {
+            date: { [Op.gte]: doc.finished_at },
+            status: { [Op.or]: [{ [Op.is]: null }, { [Op.ne]: 'cancelled' }] },
+          },
+        }],
+        group: ['product_id'],
+        raw: true,
+      }).catch(() => []);
+      soldAfter = new Map(sold.map(r => [r.product_id, Number(r.q) || 0]));
+    }
+
+    const products = await ProductModel.findAll({ where: { id: { [Op.in]: ids } } });
+    const byId = new Map(products.map(p => [p.id, p]));
+
+    // Qaytariladigan qiymat = hujjat ochilgandagi qoldiq − keyin sotilgani
+    const restore = [];
+    for (const it of real) {
+      const p = byId.get(it.product_id);
+      if (!p) continue;
+      const back = (Number(it.expected_qty) || 0) - (soldAfter.get(p.id) || 0);
+      if (Number(p.qty) !== back) restore.push({ id: p.id, qty: back });
+    }
+
+    let fixedBatches = 0;
+
+    await sequelize.transaction(async (t) => {
+      // 1. Mahsulot qoldiqlari
+      const CHUNK = 500;
+      for (let i = 0; i < restore.length; i += CHUNK) {
+        const part  = restore.slice(i, i + CHUNK);
+        const cases = part.map(r => `WHEN ${Number(r.id)} THEN ${Number(r.qty)}`).join(' ');
+        const idList = part.map(r => Number(r.id)).join(',');
+        await sequelize.query(
+          `UPDATE \`product\` SET \`qty\` = CASE \`id\` ${cases} END WHERE \`id\` IN (${idList})`,
+          { transaction: t }
+        );
+      }
+
+      // 2. Yakunlash ochgan "ortiqcha" kirim hujjatlarini o'chiramiz
+      const extras = await PurchaseModel.findAll({
+        where: { comment: { [Op.like]: `Inventarizatsiya #${doc.doc_number} — ortiqcha%` } },
+        transaction: t,
+      });
+      if (extras.length) {
+        const pids = extras.map(p => p.id);
+        await PurchaseItemModel.destroy({ where: { purchase_id: { [Op.in]: pids } }, transaction: t });
+        await PurchaseModel.destroy({ where: { id: { [Op.in]: pids } }, transaction: t });
+      }
+
+      // 3. FIFO partiyalarini qoldiqqa moslaymiz — aks holda sotuvda
+      //    tannarx topilmaydi
+      const allBatches = await PurchaseItemModel.findAll({
+        where: { product_id: { [Op.in]: restore.map(r => r.id) } },
+        order: [['id', 'ASC']], transaction: t,
+      });
+      const byProduct = new Map();
+      for (const b of allBatches) {
+        if (!byProduct.has(b.product_id)) byProduct.set(b.product_id, []);
+        byProduct.get(b.product_id).push(b);
+      }
+
+      for (const r of restore) {
+        const batches = byProduct.get(r.id) || [];
+        if (!batches.length) continue;
+        const total = batches.reduce((a, b) => a + (Number(b.stock_qty) || 0), 0);
+        if (total === r.qty) continue;
+
+        let need = r.qty;
+        for (const b of batches) {
+          // Partiyaga sig'adigan maksimal qoldiq: kelgan − sotilgan
+          const cap  = Math.max(0, (Number(b.unit_qty) || 0) - (Number(b.sold_qty) || 0));
+          const give = Math.min(cap, Math.max(0, need));
+          if (Number(b.stock_qty) !== give) {
+            await b.update({ stock_qty: give }, { transaction: t });
+            fixedBatches++;
+          }
+          need -= give;
+        }
+        // Sig'im yetmasa — oxirgi partiyaga qo'shamiz
+        if (need > 0) {
+          const last = batches[batches.length - 1];
+          await last.update(
+            { stock_qty: (Number(last.stock_qty) || 0) + need }, { transaction: t }
+          );
+          fixedBatches++;
+        }
+      }
+
+      // 4. Hujjat qayta ochiladi — sanoqni davom ettirish mumkin
+      await doc.update({
+        status: 'draft',
+        finished_at: null,
+        total_counted: 0,
+        total_diff_sum: 0,
+      }, { transaction: t });
+    });
+
+    const soldTotal = [...soldAfter.values()].reduce((a, b) => a + b, 0);
+
+    res.json({
+      ok: true,
+      qaytarildi:     restore.length,
+      partiyalar:     fixedBatches,
+      keyin_sotilgan: soldTotal,
+      xabar: `${restore.length} ta tovar qoldig'i qaytarildi` +
+             (soldTotal ? `, keyin sotilgan ${soldTotal} dona hisobga olindi` : ''),
+    });
   };
 
   cancel = async (req, res) => {

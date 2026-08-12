@@ -361,6 +361,11 @@ class PurchaseController extends BaseController {
       .map(v => parseInt(v, 10))
       .filter(Number.isInteger);
 
+    // id berilmasa butun bazadagi partiyalar tortilardi — bir necha ming
+    // tovarli do'konda bu sotuv sahifasini qotirardi. Ro'yxat bo'sh bo'lsa
+    // qaytaradigan narsa ham yo'q.
+    if (!ids.length) return res.json([]);
+
     // Har product_id bo'yicha eng eski partiyani tanlaymiz: avval
     // guruhlab minimal (sana, id) ni topamiz, so'ng o'sha qatorni olamiz.
     const rows = await sequelize.query(

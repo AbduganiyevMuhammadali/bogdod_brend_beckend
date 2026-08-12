@@ -28,6 +28,8 @@ router.get('/',                auth(), awaitHF(ctrl.getAll));
 router.get('/categories',      auth(), awaitHF(ctrl.getCategories));
 router.get('/brands',          auth(), awaitHF(ctrl.getBrands));
 router.get('/low-stock-count', auth(), awaitHF(ctrl.getLowStockCount));
+// Sahifa ko'rsatkichlari — butun ro'yxatni yuklamasdan bazada hisoblanadi
+router.get('/stats',           auth(), awaitHF(ctrl.getStats));
 router.get('/by-barcode/:code',auth(), awaitHF(ctrl.getByBarcode));
 router.get('/:id',             auth(), awaitHF(ctrl.getById));
 

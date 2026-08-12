@@ -20,18 +20,56 @@ class SupplierController extends BaseController {
         { code:  { [Op.like]: `%${search}%` } },
       ]
     }
-    const rows = await SupplierModel.findAll({ where, order: [['name', 'ASC']] })
+    // Ro'yxat cheklanadi — global qidiruv har harfda shu endpointni
+    // chaqiradi, cheksiz ro'yxat esa yetkazuvchi ko'paygan sari sekinlashadi
+    const limit = Math.min(Number(req.query.limit) > 0 ? Number(req.query.limit) : 200, 500)
+    const rows = await SupplierModel.findAll({ where, order: [['name', 'ASC']], limit })
+    if (!rows.length) return res.json(rows)
 
-    // Har bir supplier uchun haqiqiy balansni hisoblash va kerak bo'lsa sinxronlashtirish
-    await Promise.all(rows.map(async (s) => {
-      const purchased = await PurchaseModel.sum('total_sum', { where: { supplier_id: s.id, status: 'confirmed' } }) || 0
-      const paid      = await CashTransactionModel.sum('amount', { where: { reference_type: 'supplier_payment', reference_id: s.id } }) || 0
-      const computed  = paid - purchased
-      if (Number(s.balance) !== computed) {
-        await s.update({ balance: computed })
-      }
+    const ids = rows.map(s => s.id)
+
+    // Balanslar ikkita guruhlangan so'rovda hisoblanadi. Ilgari har
+    // yetkazuvchi uchun alohida ikkita SUM ketardi (va farq bo'lsa yana
+    // bitta UPDATE) — 200 ta yetkazuvchida 400+ so'rov degani edi.
+    const [purchasedRows, paidRows] = await Promise.all([
+      PurchaseModel.findAll({
+        attributes: [
+          'supplier_id',
+          [sequelize.fn('SUM', sequelize.col('total_sum')), 'total'],
+        ],
+        where: { supplier_id: { [Op.in]: ids }, status: 'confirmed' },
+        group: ['supplier_id'],
+        raw: true,
+      }),
+      CashTransactionModel.findAll({
+        attributes: [
+          'reference_id',
+          [sequelize.fn('SUM', sequelize.col('amount')), 'total'],
+        ],
+        where: { reference_type: 'supplier_payment', reference_id: { [Op.in]: ids } },
+        group: ['reference_id'],
+        raw: true,
+      }),
+    ])
+
+    const purchasedBy = new Map(purchasedRows.map(r => [r.supplier_id,  Number(r.total) || 0]))
+    const paidBy      = new Map(paidRows.map(r      => [r.reference_id, Number(r.total) || 0]))
+
+    // Nomuvofiq balanslarni bitta so'rovda to'g'rilaymiz
+    const fixes = []
+    rows.forEach(s => {
+      const computed = (paidBy.get(s.id) || 0) - (purchasedBy.get(s.id) || 0)
+      if (Number(s.balance) !== computed) fixes.push({ id: s.id, balance: computed })
       s.balance = computed
-    }))
+    })
+
+    if (fixes.length) {
+      const cases = fixes.map(f => `WHEN ${Number(f.id)} THEN ${Number(f.balance)}`).join(' ')
+      const idList = fixes.map(f => Number(f.id)).join(',')
+      await sequelize.query(
+        `UPDATE \`supplier\` SET \`balance\` = CASE \`id\` ${cases} END WHERE \`id\` IN (${idList})`
+      )
+    }
 
     res.json(rows)
   }
