@@ -30,6 +30,27 @@ async function currentCost(productId, transaction) {
 // Ilgari bu yerda `limit: 5` bor edi — kod bir necha tovarda substring
 // sifatida uchrasa, keraklisi shu 5 tadan tashqarida qolib, tovar
 // "bazada yo'q" deb hisoblanardi va ortiqcha ro'yxatiga tushardi.
+// Shtrix-kod bo'yicha BARCHA mos tovarlarni topadi.
+// Bir kod bir necha tovarga berilgan bo'lsa (razmerlar chalkashgani kabi),
+// skanerlash doim birinchisiga tushadi va qolganlari "topilmadi" bo'lib
+// qoladi — shuning uchun bunday holatni aniqlab, ogohlantiramiz.
+async function findAllProductsByBarcode(code) {
+  const found = new Map();
+  for (const variant of barcodeVariants(code)) {
+    const rows = await ProductModel.findAll({
+      where: { barcodes: { [Op.like]: `%${variant}%` } },
+      limit: 50,
+    });
+    rows.forEach(p => {
+      if (Array.isArray(p.barcodes) &&
+          p.barcodes.some(b => String(b).trim() === variant)) {
+        found.set(p.id, p);
+      }
+    });
+  }
+  return [...found.values()];
+}
+
 async function findProductByBarcode(code) {
   for (const variant of barcodeVariants(code)) {
     // Avval eng aniq shakl: JSON element sifatida to'liq moslik
@@ -202,8 +223,18 @@ class InventoryController extends BaseController {
     // skanerlanganda satr topilmasdi. Natijada mavjud tovar "ortiqcha"
     // bo'lib qolardi.
 
-    // 1) Shtrix-kod bo'yicha bazadagi mahsulotni aniqlaymiz
-    const product = await findProductByBarcode(code);
+    // 1) Shtrix-kod bo'yicha bazadagi mahsulotni aniqlaymiz.
+    //
+    // Bir kod bir necha tovarga berilgan bo'lishi mumkin (masalan razmerlar
+    // chalkashib, 4XL/5XL/6XL ga bir xil yorliq bosilgan). Bunda skanerlash
+    // doim BIRINCHISIGA tushadi: u "ortiqcha" bo'ladi, qolganlari esa
+    // "topilmadi" bo'lib qoladi. Buni jimgina o'tkazib yubormaymiz —
+    // kassirga aytamiz.
+    const matches = await findAllProductsByBarcode(code);
+    const product = matches[0] || null;
+    const chalkash = matches.length > 1
+      ? matches.map(p => ({ id: p.id, name: p.name }))
+      : null;
 
     let item = null;
 
@@ -272,6 +303,9 @@ class InventoryController extends BaseController {
       ok: true,
       holat,
       takroriy: oldCounted > 0,
+      // Bir kod bir necha tovarga berilgan bo'lsa — kassir buni bilishi
+      // kerak, aks holda "ortiqcha"/"topilmadi" sababi tushunarsiz qoladi
+      chalkash,
       item: {
         id: item.id,
         product_id:   item.product_id,

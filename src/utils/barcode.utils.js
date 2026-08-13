@@ -23,20 +23,19 @@ function barcodeVariants(code) {
 
   // Faqat raqamli kodlar uchun nol bilan o'ynash mantiqiy
   if (/^\d+$/.test(s)) {
-    // 12 xona -> boshiga 0 qo'shib 13 ga (skaner nolni tushirgan holat)
-    if (s.length === 12) out.push('0' + s);
+    // Kodning "o'zagi" — boshidagi barcha nollarsiz shakl.
+    // Skaner bitta emas, bir nechta nolni ham tushirib yuborishi mumkin
+    // (masalan yorliqda 0025118631939 -> skanerda 25118631939).
+    const core = s.replace(/^0+/, '');
+    if (core && core !== s) out.push(core);
 
-    // 13 xona va 0 bilan boshlanadi -> nolsiz 12 xonali shakl
-    if (s.length === 13 && s[0] === '0') out.push(s.slice(1));
-
-    // Ba'zi tizimlar kodni 14 xonagacha nol bilan to'ldiradi (ITF-14)
-    if (s.length === 14 && s[0] === '0') out.push(s.slice(1));
-    if (s.length === 13) out.push('0' + s);
-
-    // Boshidagi barcha nollarni olib tashlagan shakl — kod matn ustuniga
-    // raqam sifatida yozilib qolgan bo'lsa yordam beradi
-    const trimmed = s.replace(/^0+/, '');
-    if (trimmed && trimmed !== s) out.push(trimmed);
+    // O'zakni 12, 13 va 14 xonagacha nol bilan to'ldirilgan shakllar.
+    // Shu bitta halqa ilgarigi barcha alohida holatlarni qamrab oladi:
+    // 12->13, 13->12, 14->13 va ko'p nolli variantlar.
+    const base = core || s;
+    for (const len of [12, 13, 14]) {
+      if (base.length < len) out.push(base.padStart(len, '0'));
+    }
   }
 
   // Takrorlarni olib tashlaymiz, tartib saqlanadi

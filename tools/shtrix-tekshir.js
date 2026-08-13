@@ -35,7 +35,6 @@ const DOC_ID = idArg ? Number(idArg.split('=')[1]) : null;
     { replacements: [doc.id] }
   );
   console.log(`"Noma'lum tovar" satrlari: ${unknown.length} ta`);
-  if (!unknown.length) { await sequelize.close(); return; }
 
   // Har birini bazada qidiramiz — turli usullar bilan
   let topildi = 0, yoq = 0;
@@ -77,9 +76,11 @@ const DOC_ID = idArg ? Number(idArg.split('=')[1]) : null;
     }
   }
 
-  console.log(`  bazada topildi:     ${topildi} ta  <- bular xato, ulanishi kerak edi`);
-  console.log(`  bazada haqiqatan yo'q: ${yoq} ta  <- yangi/yorliqsiz tovar\n`);
-  if (misollar.length) console.table(misollar);
+  if (unknown.length) {
+    console.log(`  bazada topildi:     ${topildi} ta  <- bular xato, ulanishi kerak edi`);
+    console.log(`  bazada haqiqatan yo'q: ${yoq} ta  <- yangi/yorliqsiz tovar\n`);
+    if (misollar.length) console.table(misollar);
+  }
 
   // Umumiy holat: bazadagi shtrix-kodlar qanday saqlangan
   console.log('\nBAZADAGI SHTRIX-KOD FORMATLARI (namuna):');
@@ -93,6 +94,48 @@ const DOC_ID = idArg ? Number(idArg.split('=')[1]) : null;
   );
   const [[tot]] = await sequelize.query('SELECT COUNT(*) n FROM `product`');
   console.log(`\nShtrix-kodi YO'Q tovarlar: ${cnt.n} / ${tot.n}`);
+
+  // ── TAKRORLANUVCHI SHTRIX-KODLAR ────────────────────────────────────
+  // Bitta kod bir necha tovarga berilgan bo'lsa, skanerlashda doim
+  // BITTASI topiladi: u "ortiqcha" (3/1) bo'ladi, qolganlari esa
+  // "topilmadi" (0/1) bo'lib qoladi. Sanoqdagi eng ko'p uchraydigan
+  // chalkashlik shu.
+  console.log('\nTAKRORLANUVCHI SHTRIX-KODLAR:');
+  const [allP] = await sequelize.query(
+    "SELECT id, name, barcodes FROM `product` WHERE barcodes IS NOT NULL AND barcodes <> '[]'"
+  );
+  const byCode = new Map();
+  for (const p of allP) {
+    let list = [];
+    try { list = JSON.parse(p.barcodes) || []; } catch { /* buzuq JSON */ }
+    for (const b of list) {
+      const key = String(b).trim();
+      if (!key) continue;
+      if (!byCode.has(key)) byCode.set(key, []);
+      byCode.get(key).push(p);
+    }
+  }
+  const dups = [...byCode.entries()].filter(([, v]) => v.length > 1);
+  console.log(`  bir nechta tovarda uchraydigan kod: ${dups.length} ta`);
+  if (dups.length) {
+    console.log('  (bu sanoqda "ortiqcha" va "topilmadi" ni bir vaqtda keltiradi)\n');
+    dups.slice(0, 10).forEach(([code, list]) => {
+      console.log(`  ${code} -> ${list.length} ta tovar:`);
+      list.forEach(p => console.log(`      #${p.id} ${String(p.name).slice(0, 46)}`));
+    });
+    if (dups.length > 10) console.log(`  ... yana ${dups.length - 10} ta`);
+  }
+
+  // Buzuq JSON — kod umuman o'qilmaydi
+  const buzuq = allP.filter(p => {
+    try { const v = JSON.parse(p.barcodes); return !Array.isArray(v); }
+    catch { return true; }
+  });
+  if (buzuq.length) {
+    console.log(`\nBUZUQ shtrix-kod yozuvi: ${buzuq.length} ta tovar`);
+    buzuq.slice(0, 5).forEach(p =>
+      console.log(`  #${p.id} ${String(p.name).slice(0, 40)}: ${p.barcodes}`));
+  }
 
   await sequelize.close();
 })().catch(async e => {
