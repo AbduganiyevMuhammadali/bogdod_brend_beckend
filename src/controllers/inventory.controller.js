@@ -281,8 +281,21 @@ class InventoryController extends BaseController {
     }
 
     const oldCounted = Number(item.counted_qty) || 0;
-    const newCounted = oldCounted + step;
     const expected   = Number(item.expected_qty) || 0;
+
+    // ── Sanoqni oshirish qoidasi ─────────────────────────────────────
+    //
+    // Tovar hisobdagi miqdorgacha to'lgan bo'lsa, yana urilganda sanoq
+    // OSHMAYDI — faqat ogohlantiramiz. Aks holda sanoqchi bir tovarni
+    // ikkinchi marta urib yuborsa (ro'yxatni tekshirayotganda oson
+    // bo'ladi), u "ortiqcha" ga tushib qolardi va topildi/ortiqcha
+    // raqamlari buzilardi.
+    //
+    // Haqiqiy ortiqchani ham yozib olish kerak, shuning uchun bazada
+    // yo'q tovar (product_id yo'q) yoki hisobda umuman qoldig'i
+    // bo'lmagan tovar (expected = 0) uchun sanoq oshaveradi.
+    const tolgan  = item.product_id && expected > 0 && oldCounted >= expected;
+    const newCounted = tolgan ? oldCounted : oldCounted + step;
 
     // `is_extra` — faqat bazada yo'q yoki hisobda qoldig'i bo'lmagan tovar
     // uchun. Ilgari bu bayroq bir marta qo'yilgach hech qachon olinmasdi:
@@ -295,15 +308,13 @@ class InventoryController extends BaseController {
 
     // Frontend shu qiymatga qarab ovoz tanlaydi.
     //
-    // "takror" — faqat hisobdagi miqdor TO'LGANDAN keyin yana urilgan
-    // bo'lsa. Ilgari `oldCounted > 0` tekshirilardi: hisobda 2 dona
-    // bo'lgan tovarning ikkinchi donasini urganda ham "oldin urilgan"
-    // deb chiqardi va sanoqchi chalkashardi. Endi 2 donadan ikkinchisi
-    // normal "topildi" bo'ladi, uchinchisi esa "ortiqcha".
+    //   takror   — allaqachon to'liq sanalgan, sanoq oshmadi
+    //   ortiqcha — hisobda yo'q tovar sanaldi (haqiqiy ortiqcha)
+    //   topildi  — normal sanoq (2 donadan ikkinchisi ham shu yerda)
     let holat = 'topildi';
-    if (!item.product_id)                holat = 'notanish';  // bazada yo'q
-    else if (newCounted > expected)      holat = 'ortiqcha';  // hisobdagidan ko'p
-    else if (expected === 1 && oldCounted > 0) holat = 'takror'; // 1 donalik qayta urildi
+    if (!item.product_id)            holat = 'notanish';   // bazada yo'q
+    else if (tolgan)                 holat = 'takror';     // to'lgan, oshmadi
+    else if (newCounted > expected)  holat = 'ortiqcha';   // hisobdagidan ko'p
 
 
     res.json({
@@ -346,6 +357,7 @@ class InventoryController extends BaseController {
     let birlashtirildi = 0;   // dublikat satrlar asosiysiga qo'shildi
     let boglandi       = 0;   // "noma'lum" satr bazadagi tovarga ulandi
     let bayroq         = 0;   // is_extra to'g'rilandi
+    let oshgan         = 0;   // qayta urilib oshib ketgan sanoq to'g'rilandi
 
     await sequelize.transaction(async (t) => {
       // 1) product_id bo'yicha guruhlash — bir tovarga bir nechta satr
@@ -418,6 +430,21 @@ class InventoryController extends BaseController {
           bayroq++;
         }
       }
+
+      // 4) Bazadagi tovar hisobdagidan ko'p sanalgan bo'lsa — qayta
+      //    urilgani uchun oshib ketgan. Uni hisobdagi miqdorga
+      //    qaytaramiz: tovar omborda bor, ortiqcha emas.
+      //
+      //    Haqiqiy ortiqchaga (expected = 0 yoki bazada yo'q tovar)
+      //    tegilmaydi — u rostdan hisobda yo'q.
+      for (const it of fresh) {
+        if (!it.product_id) continue;
+        const exp = Number(it.expected_qty) || 0;
+        if (exp > 0 && Number(it.counted_qty) > exp) {
+          await it.update({ counted_qty: exp }, { transaction: t });
+          oshgan++;
+        }
+      }
     });
 
     const full = await InventoryModel.findOne({
@@ -430,8 +457,10 @@ class InventoryController extends BaseController {
       birlashtirildi,
       boglandi,
       bayroq_tuzatildi: bayroq,
+      oshgan_tuzatildi: oshgan,
       xabar: `${birlashtirildi} ta dublikat birlashtirildi, ` +
-             `${boglandi} ta tovar bazaga ulandi, ${bayroq} ta belgi to'g'rilandi`,
+             `${boglandi} ta tovar bazaga ulandi, ` +
+             `${oshgan} ta oshib ketgan sanoq to'g'rilandi`,
       doc: full,
     });
   };
