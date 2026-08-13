@@ -123,6 +123,14 @@ module.exports = async function(){
         } catch { /* already exists */ }
     }
 
+    // Qoldiq "surat"lari (snapshot) — ommaviy o'zgarishdan oldin qoldiqlar
+    // shu jadvalga nusxalanadi va kerak bo'lsa bir buyruq bilan qaytariladi
+    try {
+        await require('../utils/stockGuard.utils').ensureTable();
+    } catch (e) {
+        console.log('stock_snapshot jadvali yaratilmadi:', e.message);
+    }
+
     // Bir martalik tuzatishlar. Bajarilgani `app_setting` da belgilanadi —
     // aks holda har server ishga tushganda takrorlanib, foydalanuvchi qo'lda
     // o'zgartirgan holatni bekor qilib yuborardi.

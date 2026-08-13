@@ -357,14 +357,51 @@ class ProductController extends BaseController {
     res.json(product);
   };
 
+  // Mahsulotni o'chirish.
+  //
+  // Ilgari bu `force: true` bilan mahsulotni butunlay o'chirib yuborardi —
+  // qoldig'i bor, sotuv tarixi bor tovar ham yo'q bo'lardi va hisobotlar
+  // buzilardi. Endi:
+  //   • qoldig'i bor bo'lsa           → o'chirilmaydi
+  //   • sotuv/kirim tarixi bor bo'lsa → butunlay emas, "arxivga" olinadi
+  //     (paranoid delete: satr bazada qoladi, hisobot buzilmaydi)
+  //   • tarixi yo'q bo'lsa            → butunlay o'chiriladi
   delete = async (req, res) => {
     const product = await ProductModel.findOne({ where: { id: req.params.id } });
     if (!product) throw new HttpException(404, req.mf('data not found'));
-    try {
-      await product.destroy({ force: true });
-    } catch {
-      await product.destroy();
+
+    const qty = Number(product.qty) || 0;
+    if (qty > 0 && req.query.force !== 'true') {
+      throw new HttpException(
+        409,
+        `"${product.name}" da ${qty} dona qoldiq bor. ` +
+        `Avval qoldiqni nolga tushiring yoki tovarni faolsiz qiling.`,
+        { code: 'QOLDIQ_BOR', qty }
+      );
     }
+
+    // Tarixi bormi — sotuv yoki kirim satrlari
+    const SaleItemModel     = require('../models/sale_item.model');
+    const PurchaseItemModel = require('../models/purchase_item.model');
+    const [sold, bought] = await Promise.all([
+      SaleItemModel.count({ where: { product_id: product.id } }).catch(() => 0),
+      PurchaseItemModel.count({ where: { product_id: product.id } }).catch(() => 0),
+    ]);
+
+    if (sold > 0 || bought > 0) {
+      // Tarixi bor — faqat arxivga olamiz (paranoid). Shunda eski
+      // hisobotlarda tovar nomi ko'rinib turadi.
+      await product.destroy();
+      return res.json({
+        message: 'Mahsulot arxivga olindi (sotuv/kirim tarixi saqlanadi)',
+        arxiv: true,
+        sotuvlar: sold,
+        kirimlar: bought,
+      });
+    }
+
+    // Tarixi yo'q — butunlay o'chirish xavfsiz
+    await product.destroy({ force: true });
     res.json({ message: req.mf('data has been deleted') });
   };
 

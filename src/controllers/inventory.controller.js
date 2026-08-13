@@ -7,6 +7,7 @@ const PurchaseModel      = require('../models/purchase.model');
 const sequelize          = require('../db/db-sequelize');
 const HttpException      = require('../utils/HttpException.utils');
 const BaseController     = require('./BaseController');
+const stockGuard         = require('../utils/stockGuard.utils');
 
 // Mahsulotning joriy tannarxi — FIFO bo'yicha eng eski ochiq partiyadan.
 // Farq summasini hisoblashda ishlatiladi.
@@ -17,6 +18,36 @@ async function currentCost(productId, transaction) {
     transaction,
   });
   return Number(batch?.cost_price) || 0;
+}
+
+// Shtrix-kod bo'yicha mahsulotni topadi.
+//
+// `barcodes` — JSON massiv (masalan ["123","456"]), shuning uchun aniq
+// moslikni SQL o'zi topa olmaydi: LIKE bilan nomzodlarni olib, keyin
+// massiv ichida haqiqatan bor-yo'qligini tekshiramiz.
+//
+// Ilgari bu yerda `limit: 5` bor edi — kod bir necha tovarda substring
+// sifatida uchrasa, keraklisi shu 5 tadan tashqarida qolib, tovar
+// "bazada yo'q" deb hisoblanardi va ortiqcha ro'yxatiga tushardi.
+async function findProductByBarcode(code) {
+  // Avval eng aniq shakl: JSON element sifatida to'liq moslik
+  const exact = await ProductModel.findAll({
+    where: { barcodes: { [Op.like]: `%"${code}"%` } },
+    limit: 50,
+  });
+  const hit = exact.find(p => Array.isArray(p.barcodes) && p.barcodes.includes(code));
+  if (hit) return hit;
+
+  // Ba'zi tovarlarda kod bo'sh joy/nol bilan yozilgan bo'lishi mumkin —
+  // kengroq qidirib, massiv ichini qat'iy tekshiramiz
+  const loose = await ProductModel.findAll({
+    where: { barcodes: { [Op.like]: `%${code}%` } },
+    limit: 50,
+  });
+  return loose.find(p =>
+    Array.isArray(p.barcodes) &&
+    p.barcodes.some(b => String(b).trim() === code)
+  ) || null;
 }
 
 // Ko'p mahsulotning tannarxini bitta so'rov bilan oladi.
@@ -103,6 +134,10 @@ class InventoryController extends BaseController {
     // Barcha tannarxlar bitta so'rovda — har mahsulot uchun alohida emas
     const costs = await costMap(products.map(p => p.id), null);
 
+    // Skanerlashda tovar `product_id` bo'yicha topiladi, shuning uchun
+    // hujjatdagi `barcode` faqat ko'rsatish uchun. Bir nechta kod bo'lsa
+    // birinchisini yozamiz — qolganlari bilan skanerlansa ham topiladi.
+
     let doc;
     await sequelize.transaction(async (t) => {
       const maxDoc = await InventoryModel.max('doc_number', { transaction: t });
@@ -153,44 +188,48 @@ class InventoryController extends BaseController {
     const code = String(barcode).trim();
     const step = Number(qty) || 1;
 
-    // 1) Hujjatdagi satrlar orasidan qidiramiz
-    let item = await InventoryItemModel.findOne({
-      where: { inventory_id: doc.id, barcode: code },
-    });
+    // ── Tovarni topish tartibi ───────────────────────────────────────
+    //
+    // Muhim: avval BAZADAN mahsulotni aniqlaymiz, keyin hujjatdan uning
+    // satrini qidiramiz. Ilgari teskarisi edi — faqat `barcode` ustuni
+    // bo'yicha qidirilardi va hujjatga tovarning faqat BIRINCHI
+    // shtrix-kodi yozilgani uchun (barcodes[0]) ikkinchi/uchinchi kod
+    // skanerlanganda satr topilmasdi. Natijada mavjud tovar "ortiqcha"
+    // bo'lib qolardi.
 
-    // 2) Topilmasa — bazadagi mahsulotlar orasidan (barcodes JSON ichida)
-    if (!item) {
-      // JSON massiv ichida to'liq element sifatida mos kelishi kerak.
-      // `%code%` bo'lsa, skanerlangan kod boshqa tovarning shtrix-kodi
-      // ichiga kirib qolsa noto'g'ri tovar topilardi.
-      const candidates = await ProductModel.findAll({
-        where: { barcodes: { [Op.like]: `%"${code}"%` } },
-        limit: 5,
+    // 1) Shtrix-kod bo'yicha bazadagi mahsulotni aniqlaymiz
+    const product = await findProductByBarcode(code);
+
+    let item = null;
+
+    if (product) {
+      // 2) Shu mahsulotning hujjatdagi satri — qaysi kod bilan
+      //    kiritilganidan qat'i nazar
+      item = await InventoryItemModel.findOne({
+        where: { inventory_id: doc.id, product_id: product.id },
       });
-      const product = candidates.find(
-        p => Array.isArray(p.barcodes) && p.barcodes.includes(code)
-      ) || null;
 
-      if (product) {
-        // Hujjatda shu mahsulot satri bormi (boshqa shtrix-kod bilan)
-        item = await InventoryItemModel.findOne({
-          where: { inventory_id: doc.id, product_id: product.id },
+      if (!item) {
+        // Hujjat ochilgandan keyin qo'shilgan yoki qoldig'i 0 bo'lgan tovar
+        item = await InventoryItemModel.create({
+          inventory_id: doc.id,
+          product_id:   product.id,
+          product_name: product.name,
+          barcode:      code,
+          expected_qty: Number(product.qty) || 0,
+          counted_qty:  0,
+          cost_price:   await currentCost(product.id),
+          is_extra:     Number(product.qty) <= 0,
         });
+      }
+    } else {
+      // 3) Bazada topilmadi — hujjatdagi "noma'lum tovar" satrini
+      //    shtrix-kod bo'yicha qidiramiz (qayta urilgan bo'lishi mumkin)
+      item = await InventoryItemModel.findOne({
+        where: { inventory_id: doc.id, barcode: code },
+      });
 
-        if (!item) {
-          // Hujjat ochilgandan keyin qo'shilgan yoki qoldig'i 0 bo'lgan tovar
-          item = await InventoryItemModel.create({
-            inventory_id: doc.id,
-            product_id:   product.id,
-            product_name: product.name,
-            barcode:      code,
-            expected_qty: Number(product.qty) || 0,
-            counted_qty:  0,
-            cost_price:   await currentCost(product.id),
-            is_extra:     Number(product.qty) <= 0,
-          });
-        }
-      } else {
+      if (!item) {
         // Bazada umuman yo'q — ortiqcha tovar sifatida qayd etamiz
         item = await InventoryItemModel.create({
           inventory_id: doc.id,
@@ -209,7 +248,14 @@ class InventoryController extends BaseController {
     const newCounted = oldCounted + step;
     const expected   = Number(item.expected_qty) || 0;
 
-    await item.update({ counted_qty: newCounted, scanned_at: new Date() });
+    // `is_extra` — faqat bazada yo'q yoki hisobda qoldig'i bo'lmagan tovar
+    // uchun. Ilgari bu bayroq bir marta qo'yilgach hech qachon olinmasdi:
+    // qoldig'i bor tovar ham "ortiqcha" ro'yxatida qolib ketardi.
+    const shouldBeExtra = !item.product_id || expected <= 0;
+
+    const patch = { counted_qty: newCounted, scanned_at: new Date() };
+    if (Boolean(item.is_extra) !== shouldBeExtra) patch.is_extra = shouldBeExtra;
+    await item.update(patch);
 
     // Frontend shu qiymatga qarab ovoz tanlaydi
     let holat = 'topildi';
@@ -230,6 +276,117 @@ class InventoryController extends BaseController {
         counted_qty:  newCounted,
         is_extra:     item.is_extra,
       },
+    });
+  };
+
+  // Hujjatdagi "ortiqcha" satrlarni qayta tekshirish va birlashtirish.
+  //
+  // Eski xato tufayli bir tovar hujjatda ikki marta paydo bo'lgan bo'lishi
+  // mumkin: biri hujjat ochilganda (expected_qty bilan), ikkinchisi
+  // skanerlaganda "ortiqcha" sifatida (expected_qty = 0). Bu metod
+  // shundaylarni topib, sanoqni asosiy satrga qo'shadi va dublikatni
+  // o'chiradi. Skanerlangan miqdor yo'qolmaydi.
+  //
+  // POST /inventories/:id/repair
+  repair = async (req, res) => {
+    const doc = await InventoryModel.findOne({ where: { id: req.params.id } });
+    if (!doc) throw new HttpException(404, 'Hujjat topilmadi');
+    if (doc.status !== 'draft') throw new HttpException(400, 'Faqat ochiq hujjatni tuzatish mumkin');
+
+    const items = await InventoryItemModel.findAll({
+      where: { inventory_id: doc.id }, order: [['id', 'ASC']],
+    });
+
+    let birlashtirildi = 0;   // dublikat satrlar asosiysiga qo'shildi
+    let boglandi       = 0;   // "noma'lum" satr bazadagi tovarga ulandi
+    let bayroq         = 0;   // is_extra to'g'rilandi
+
+    await sequelize.transaction(async (t) => {
+      // 1) product_id bo'yicha guruhlash — bir tovarga bir nechta satr
+      const byProduct = new Map();
+      for (const it of items) {
+        if (!it.product_id) continue;
+        if (!byProduct.has(it.product_id)) byProduct.set(it.product_id, []);
+        byProduct.get(it.product_id).push(it);
+      }
+
+      for (const [, list] of byProduct) {
+        if (list.length < 2) continue;
+        // Asosiy satr — expected_qty si bor bo'lgani (hujjat ochilgandagi)
+        const main = list.find(i => Number(i.expected_qty) > 0) || list[0];
+        const dups = list.filter(i => i.id !== main.id);
+
+        let add = 0;
+        for (const d of dups) {
+          add += Number(d.counted_qty) || 0;
+          await d.destroy({ transaction: t });
+          birlashtirildi++;
+        }
+        if (add) {
+          await main.update(
+            { counted_qty: (Number(main.counted_qty) || 0) + add },
+            { transaction: t }
+          );
+        }
+      }
+
+      // 2) "Noma'lum tovar" satrlarini shtrix-kod bo'yicha bazaga ulaymiz
+      const unknown = await InventoryItemModel.findAll({
+        where: { inventory_id: doc.id, product_id: null }, transaction: t,
+      });
+      for (const u of unknown) {
+        if (!u.barcode) continue;
+        const p = await findProductByBarcode(String(u.barcode).trim());
+        if (!p) continue;
+
+        // Shu tovarning asosiy satri bormi
+        const main = await InventoryItemModel.findOne({
+          where: { inventory_id: doc.id, product_id: p.id }, transaction: t,
+        });
+        if (main) {
+          await main.update(
+            { counted_qty: (Number(main.counted_qty) || 0) + (Number(u.counted_qty) || 0) },
+            { transaction: t }
+          );
+          await u.destroy({ transaction: t });
+          birlashtirildi++;
+        } else {
+          await u.update({
+            product_id:   p.id,
+            product_name: p.name,
+            expected_qty: Number(p.qty) || 0,
+            is_extra:     Number(p.qty) <= 0,
+          }, { transaction: t });
+          boglandi++;
+        }
+      }
+
+      // 3) is_extra bayrog'ini haqiqiy holatga moslaymiz
+      const fresh = await InventoryItemModel.findAll({
+        where: { inventory_id: doc.id }, transaction: t,
+      });
+      for (const it of fresh) {
+        const should = !it.product_id || Number(it.expected_qty) <= 0;
+        if (Boolean(it.is_extra) !== should) {
+          await it.update({ is_extra: should }, { transaction: t });
+          bayroq++;
+        }
+      }
+    });
+
+    const full = await InventoryModel.findOne({
+      where: { id: doc.id },
+      include: [{ model: InventoryItemModel, as: 'items' }],
+    });
+
+    res.json({
+      ok: true,
+      birlashtirildi,
+      boglandi,
+      bayroq_tuzatildi: bayroq,
+      xabar: `${birlashtirildi} ta dublikat birlashtirildi, ` +
+             `${boglandi} ta tovar bazaga ulandi, ${bayroq} ta belgi to'g'rilandi`,
+      doc: full,
     });
   };
 
@@ -267,6 +424,48 @@ class InventoryController extends BaseController {
     });
     if (!doc) throw new HttpException(404, 'Hujjat topilmadi');
     if (doc.status !== 'draft') throw new HttpException(400, 'Hujjat allaqachon yakunlangan');
+
+    // ── HIMOYA: tugallanmagan sanoq butun omborni nolga tushirmasin ──
+    //
+    // Brauzerdagi ogohlantirishga tayanib bo'lmaydi: so'rov to'g'ridan-to'g'ri
+    // ham yuborilishi mumkin. Shuning uchun tekshiruv shu yerda — serverda.
+    //
+    // Skanerlanmagan (counted_qty = 0, lekin hisobda qoldig'i bor) tovarlar
+    // yakunlashda 0 ga tushadi. Ular ko'p bo'lsa — bu sanoq emas, xato.
+    const willZero = doc.items.filter(i =>
+      i.product_id &&
+      Number(i.counted_qty) === 0 &&
+      Number(i.expected_qty) > 0
+    ).length;
+
+    const scanned = doc.items.filter(i => Number(i.counted_qty) > 0).length;
+
+    // `force` faqat foydalanuvchi ogohlantirishni ko'rib, ataylab
+    // tasdiqlaganda yuboriladi
+    if (willZero > 0 && req.body?.force !== true) {
+      // Xabar matn bo'lishi kerak (error middleware uni tarjima qiladi),
+      // qo'shimcha ma'lumot `data` orqali beriladi
+      throw new HttpException(
+        409,
+        `Sanoq tugallanmagan: ${willZero} ta tovarning qoldig'i 0 ga tushadi. ` +
+        `Skanerlangan: ${scanned} ta.`,
+        { code: 'SANOQ_TUGALLANMAGAN', nolga_tushadi: willZero, skanerlangan: scanned }
+      );
+    }
+
+    // Yakunlashdan OLDIN qoldiqlarni nusxalab qo'yamiz — noto'g'ri
+    // chiqsa bitta buyruq bilan qaytariladi
+    let snapshotId = null;
+    try {
+      snapshotId = await stockGuard.takeSnapshot({
+        label:  `Inventarizatsiya #${doc.doc_number} yakunlanishidan oldin`,
+        reason: `nolga tushadi: ${willZero}, skanerlangan: ${scanned}`,
+        user:   req.currentUser,
+      });
+    } catch (e) {
+      // Snapshot olinmasa ham yakunlash to'xtamasin, lekin logga tushsin
+      console.log('Snapshot olinmadi:', e.message);
+    }
 
     let totalExpected = 0, totalCounted = 0, totalDiffSum = 0;
 
@@ -405,11 +604,15 @@ class InventoryController extends BaseController {
       }, { transaction: t });
     });
 
+    // Eski snapshot'lar cheksiz to'planmasin
+    stockGuard.pruneSnapshots(30).catch(() => {});
+
     const full = await InventoryModel.findOne({
       where: { id: doc.id },
       include: [{ model: InventoryItemModel, as: 'items' }],
     });
-    res.json(full);
+    // snapshot_id — kerak bo'lsa shu nuqtaga qaytish uchun
+    res.json({ ...full.toJSON(), snapshot_id: snapshotId, nolga_tushdi: willZero });
   };
 
   // Yakunlashni QAYTARISH (rollback).
