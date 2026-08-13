@@ -293,11 +293,18 @@ class InventoryController extends BaseController {
     if (Boolean(item.is_extra) !== shouldBeExtra) patch.is_extra = shouldBeExtra;
     await item.update(patch);
 
-    // Frontend shu qiymatga qarab ovoz tanlaydi
+    // Frontend shu qiymatga qarab ovoz tanlaydi.
+    //
+    // "takror" — faqat hisobdagi miqdor TO'LGANDAN keyin yana urilgan
+    // bo'lsa. Ilgari `oldCounted > 0` tekshirilardi: hisobda 2 dona
+    // bo'lgan tovarning ikkinchi donasini urganda ham "oldin urilgan"
+    // deb chiqardi va sanoqchi chalkashardi. Endi 2 donadan ikkinchisi
+    // normal "topildi" bo'ladi, uchinchisi esa "ortiqcha".
     let holat = 'topildi';
-    if (!item.product_id)            holat = 'notanish';   // bazada yo'q
-    else if (newCounted > expected)  holat = 'ortiqcha';   // hisobdan ko'p
-    else if (oldCounted > 0)         holat = 'takror';     // qayta urildi
+    if (!item.product_id)                holat = 'notanish';  // bazada yo'q
+    else if (newCounted > expected)      holat = 'ortiqcha';  // hisobdagidan ko'p
+    else if (expected === 1 && oldCounted > 0) holat = 'takror'; // 1 donalik qayta urildi
+
 
     res.json({
       ok: true,
