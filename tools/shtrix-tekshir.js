@@ -126,6 +126,47 @@ const DOC_ID = idArg ? Number(idArg.split('=')[1]) : null;
     if (dups.length > 10) console.log(`  ... yana ${dups.length - 10} ta`);
   }
 
+  // ── HUJJATDAGI "ORTIQCHA" SATRLAR ───────────────────────────────────
+  // Har biri uchun sababni aniqlaymiz: kod bir necha tovarga berilganmi,
+  // yoki shunchaki ko'p marta urilganmi.
+  const [ortiqcha] = await sequelize.query(
+    'SELECT ii.id, ii.product_id, ii.product_name, ii.barcode, ' +
+    '       ii.expected_qty, ii.counted_qty, p.barcodes ' +
+    '  FROM `inventory_item` ii LEFT JOIN `product` p ON p.id = ii.product_id ' +
+    ' WHERE ii.inventory_id = ? AND ii.counted_qty > ii.expected_qty ' +
+    ' ORDER BY (ii.counted_qty - ii.expected_qty) DESC LIMIT 40',
+    { replacements: [doc.id] }
+  );
+
+  if (ortiqcha.length) {
+    console.log(`\n"ORTIQCHA" SATRLAR: ${ortiqcha.length} ta (eng kattasi birinchi)`);
+    const jadval = ortiqcha.map(r => {
+      let kodlar = [];
+      try { kodlar = JSON.parse(r.barcodes) || []; } catch {}
+      // Shu tovarning kodlari boshqa tovarlarda ham bormi
+      let ulashgan = 0;
+      for (const k of kodlar) {
+        const list = byCode.get(String(k).trim());
+        if (list && list.length > 1) ulashgan = Math.max(ulashgan, list.length);
+      }
+      return {
+        tovar: String(r.product_name).slice(0, 34),
+        hisobda: Number(r.expected_qty),
+        sanaldi: Number(r.counted_qty),
+        ortiqcha: Number(r.counted_qty) - Number(r.expected_qty),
+        sabab: ulashgan > 1
+          ? `kod ${ulashgan} ta tovarda`
+          : (r.product_id ? 'ko\'p marta urilgan' : 'bazada yo\'q'),
+      };
+    });
+    console.table(jadval);
+
+    const kodChalkash = jadval.filter(x => x.sabab.startsWith('kod')).length;
+    const kopUrilgan  = jadval.filter(x => x.sabab === 'ko\'p marta urilgan').length;
+    console.log(`  chalkash kod sababli: ${kodChalkash} ta  -> yorliqni tuzatish kerak`);
+    console.log(`  ko'p marta urilgan:   ${kopUrilgan} ta  -> sanoqni qo'lda to'g'rilang`);
+  }
+
   // Buzuq JSON — kod umuman o'qilmaydi
   const buzuq = allP.filter(p => {
     try { const v = JSON.parse(p.barcodes); return !Array.isArray(v); }
