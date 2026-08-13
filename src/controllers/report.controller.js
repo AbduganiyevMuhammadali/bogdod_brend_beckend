@@ -70,17 +70,18 @@ class ReportController {
       stats({ [Op.gte]: monthAgo }),
     ])
 
-    // Today's sales per hour (lokal UZT vaqt bo'yicha)
-    const UZT = '+05:00'
+    // Bugungi sotuvlar soat bo'yicha. Sanalar bazada lokal vaqtda
+    // saqlanadi (ulanish `timezone: '+05:00'` bilan ochiladi), shuning
+    // uchun HOUR() to'g'ridan-to'g'ri lokal soatni beradi.
     const hourly = await KassaRegisterModel.findAll({
       where: { status: 'completed', date: { [Op.gte]: today } },
       attributes: [
-        [fn('HOUR', fn('CONVERT_TZ', col('date'), '+00:00', UZT)), 'hour'],
+        [fn('HOUR', col('date')), 'hour'],
         [fn('SUM', col('total_sum')), 'revenue'],
         [fn('COUNT', col('id')), 'count'],
       ],
-      group: [fn('HOUR', fn('CONVERT_TZ', col('date'), '+00:00', UZT))],
-      order: [[fn('HOUR', fn('CONVERT_TZ', col('date'), '+00:00', UZT)), 'ASC']],
+      group: [fn('HOUR', col('date'))],
+      order: [[fn('HOUR', col('date')), 'ASC']],
       raw: true,
     })
 
@@ -382,9 +383,14 @@ class ReportController {
       raw: true,
     })
 
-    // Uzbekistan UTC+5 — MySQL HOUR/DATE funksiyalari UTC da ishlaydi,
-    // shuning uchun CONVERT_TZ bilan lokal vaqtga o'tkazamiz
-    const TZ_OFFSET = '+05:00'
+    // Sanalar bazaga ALLAQACHON lokal vaqtda yoziladi: Sequelize
+    // ulanishida `timezone: '+05:00'` berilgan va MySQL sessiyasi shu
+    // zonada ochiladi. Shuning uchun HOUR()/DATE() ni to'g'ridan-to'g'ri
+    // qo'llaymiz.
+    //
+    // Ilgari bu yerda `CONVERT_TZ(date, '+00:00', '+05:00')` bor edi —
+    // u sanani UTC deb hisoblab yana +5 soat qo'shardi va grafikda
+    // sotuvlar 5 soat keyinroq (masalan 16:25 -> 21:25) ko'rinardi.
 
     // Period-based chart: revenue & profit per unit
     let chartLabels = [], chartRevenue = [], chartCost = [], chartProfit = []
@@ -393,12 +399,12 @@ class ReportController {
       const raw = await ProductRegisterModel.findAll({
         where: { status: 'active', date: { [Op.between]: [todayStart, todayEnd] } },
         attributes: [
-          [fn('HOUR', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET)), 'unit'],
+          [fn('HOUR', col('date')), 'unit'],
           [fn('SUM', col('total_sum')), 'revenue'],
           [fn('SUM', literal('cost_price * qty')), 'cost'],
         ],
-        group: [fn('HOUR', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET))],
-        order: [[fn('HOUR', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET)), 'ASC']],
+        group: [fn('HOUR', col('date'))],
+        order: [[fn('HOUR', col('date')), 'ASC']],
         raw: true,
       })
       const map = {}
@@ -416,12 +422,12 @@ class ReportController {
       const raw = await ProductRegisterModel.findAll({
         where: { status: 'active', date: { [Op.between]: [weekAgo, todayEnd] } },
         attributes: [
-          [fn('DATE', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET)), 'unit'],
+          [fn('DATE', col('date')), 'unit'],
           [fn('SUM', col('total_sum')), 'revenue'],
           [fn('SUM', literal('cost_price * qty')), 'cost'],
         ],
-        group: [fn('DATE', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET))],
-        order: [[fn('DATE', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET)), 'ASC']],
+        group: [fn('DATE', col('date'))],
+        order: [[fn('DATE', col('date')), 'ASC']],
         raw: true,
       })
       const map = {}
@@ -443,12 +449,12 @@ class ReportController {
       const raw = await ProductRegisterModel.findAll({
         where: { status: 'active', date: { [Op.between]: [monthStart, todayEnd] } },
         attributes: [
-          [fn('DATE', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET)), 'unit'],
+          [fn('DATE', col('date')), 'unit'],
           [fn('SUM', col('total_sum')), 'revenue'],
           [fn('SUM', literal('cost_price * qty')), 'cost'],
         ],
-        group: [fn('DATE', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET))],
-        order: [[fn('DATE', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET)), 'ASC']],
+        group: [fn('DATE', col('date'))],
+        order: [[fn('DATE', col('date')), 'ASC']],
         raw: true,
       })
       raw.forEach(r => {
@@ -465,12 +471,12 @@ class ReportController {
       const raw = await ProductRegisterModel.findAll({
         where: { status: 'active', date: { [Op.between]: [yearStart, todayEnd] } },
         attributes: [
-          [fn('MONTH', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET)), 'unit'],
+          [fn('MONTH', col('date')), 'unit'],
           [fn('SUM', col('total_sum')), 'revenue'],
           [fn('SUM', literal('cost_price * qty')), 'cost'],
         ],
-        group: [fn('MONTH', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET))],
-        order: [[fn('MONTH', fn('CONVERT_TZ', col('date'), '+00:00', TZ_OFFSET)), 'ASC']],
+        group: [fn('MONTH', col('date'))],
+        order: [[fn('MONTH', col('date')), 'ASC']],
         raw: true,
       })
       const map = {}
