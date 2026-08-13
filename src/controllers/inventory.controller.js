@@ -8,6 +8,7 @@ const sequelize          = require('../db/db-sequelize');
 const HttpException      = require('../utils/HttpException.utils');
 const BaseController     = require('./BaseController');
 const stockGuard         = require('../utils/stockGuard.utils');
+const { barcodeVariants } = require('../utils/barcode.utils');
 
 // Mahsulotning joriy tannarxi — FIFO bo'yicha eng eski ochiq partiyadan.
 // Farq summasini hisoblashda ishlatiladi.
@@ -30,24 +31,28 @@ async function currentCost(productId, transaction) {
 // sifatida uchrasa, keraklisi shu 5 tadan tashqarida qolib, tovar
 // "bazada yo'q" deb hisoblanardi va ortiqcha ro'yxatiga tushardi.
 async function findProductByBarcode(code) {
-  // Avval eng aniq shakl: JSON element sifatida to'liq moslik
-  const exact = await ProductModel.findAll({
-    where: { barcodes: { [Op.like]: `%"${code}"%` } },
-    limit: 50,
-  });
-  const hit = exact.find(p => Array.isArray(p.barcodes) && p.barcodes.includes(code));
-  if (hit) return hit;
+  for (const variant of barcodeVariants(code)) {
+    // Avval eng aniq shakl: JSON element sifatida to'liq moslik
+    const exact = await ProductModel.findAll({
+      where: { barcodes: { [Op.like]: `%"${variant}"%` } },
+      limit: 50,
+    });
+    const hit = exact.find(p => Array.isArray(p.barcodes) && p.barcodes.includes(variant));
+    if (hit) return hit;
 
-  // Ba'zi tovarlarda kod bo'sh joy/nol bilan yozilgan bo'lishi mumkin —
-  // kengroq qidirib, massiv ichini qat'iy tekshiramiz
-  const loose = await ProductModel.findAll({
-    where: { barcodes: { [Op.like]: `%${code}%` } },
-    limit: 50,
-  });
-  return loose.find(p =>
-    Array.isArray(p.barcodes) &&
-    p.barcodes.some(b => String(b).trim() === code)
-  ) || null;
+    // Kod bo'sh joy bilan yozilgan bo'lishi mumkin — kengroq qidirib,
+    // massiv ichini qat'iy tekshiramiz
+    const loose = await ProductModel.findAll({
+      where: { barcodes: { [Op.like]: `%${variant}%` } },
+      limit: 50,
+    });
+    const hit2 = loose.find(p =>
+      Array.isArray(p.barcodes) &&
+      p.barcodes.some(b => String(b).trim() === variant)
+    );
+    if (hit2) return hit2;
+  }
+  return null;
 }
 
 // Ko'p mahsulotning tannarxini bitta so'rov bilan oladi.

@@ -2,6 +2,7 @@ const ProductModel = require('../models/product.model');
 const HttpException = require('../utils/HttpException.utils');
 const { Op } = require('sequelize');
 const BaseController = require('./BaseController');
+const { barcodeVariants } = require('../utils/barcode.utils');
 
 const ALLOWED_FIELDS = [
   'code', 'name', 'general_name', 'unit', 'brand', 'model', 'country',
@@ -69,7 +70,9 @@ class ProductController extends BaseController {
         { general_name: { [Op.like]: `${q}%` } },
         { code:         { [Op.like]: `${q}%` } },
         { brand:        { [Op.like]: `${q}%` } },
-        { barcodes:     { [Op.like]: `%"${q}%` } },  // JSON element boshi
+        // Shtrix-kod: skaner boshidagi nolni tushirib yuborgan bo'lishi
+        // mumkin, shuning uchun barcha shakllar bo'yicha qidiramiz
+        ...barcodeVariants(q).map(v => ({ barcodes: { [Op.like]: `%"${v}%` } })),
       ];
     }
     if (category && category !== 'all') where.category = category;
@@ -124,17 +127,30 @@ class ProductController extends BaseController {
   };
 
   // Shtrix-kod bo'yicha aniq qidiruv (sotuv/kirim skaneri uchun)
+  // Shtrix-kod bo'yicha aniq qidiruv (sotuv/kirim skaneri uchun).
+  //
+  // Skaner `0` bilan boshlanadigan EAN-13 ni UPC-A deb hisoblab, boshidagi
+  // nolni tushirib yuborishi mumkin — yorliqda 13 xona, dasturga 12 xona
+  // keladi. Shuning uchun bir necha shaklni sinab ko'ramiz
+  // (barcodeVariants), aks holda tovar "topilmadi" bo'lib qolardi.
   getByBarcode = async (req, res) => {
-    const code = req.params.code;
-    // JSON massiv ichida element sifatida (qo'shtirnoq bilan) mos kelishini tekshiramiz —
-    // shunda barcode boshqasining substringi bo'lganda noto'g'ri mahsulot topilmaydi.
-    const candidates = await ProductModel.findAll({
-      where: { barcodes: { [Op.like]: `%"${code}"%` } },
-      limit: 5,
-    });
-    const product = candidates.find(p => Array.isArray(p.barcodes) && p.barcodes.includes(code));
-    if (!product) throw new HttpException(404, req.mf('data not found'));
-    res.json(product);
+    const raw = String(req.params.code || '').trim();
+
+    for (const code of barcodeVariants(raw)) {
+      // JSON massiv ichida element sifatida (qo'shtirnoq bilan) mos
+      // kelishini tekshiramiz — shunda barcode boshqasining substringi
+      // bo'lganda noto'g'ri mahsulot topilmaydi.
+      const candidates = await ProductModel.findAll({
+        where: { barcodes: { [Op.like]: `%"${code}"%` } },
+        limit: 20,
+      });
+      const product = candidates.find(
+        p => Array.isArray(p.barcodes) && p.barcodes.includes(code)
+      );
+      if (product) return res.json(product);
+    }
+
+    throw new HttpException(404, req.mf('data not found'));
   };
 
   create = async (req, res) => {
