@@ -27,6 +27,12 @@ module.exports = async function(){
         ['kassa_register',   'total_usd',          'DECIMAL(15,4) NOT NULL DEFAULT 0'],
         ['cash_transaction', 'exchange_rate',      'DECIMAL(12,2) NOT NULL DEFAULT 0'],
         ['cash_transaction', 'amount_usd',         'DECIMAL(15,4) NOT NULL DEFAULT 0'],
+        // Qarz muddati — har sotuvga alohida. Mijozda bir necha qarz
+        // bo'lsa, har birining o'z to'lash sanasi bo'ladi.
+        ['sale',             'due_date',           'DATE NULL DEFAULT NULL'],
+        // Mijoz CRM maydonlari
+        ['client',           'status',             "VARCHAR(20) NOT NULL DEFAULT 'faol'"],
+        ['client',           'tags',               'TEXT DEFAULT NULL'],
     ];
 
     // supplier jadvalini yaratish (mavjud bo'lmasa)
@@ -109,6 +115,9 @@ module.exports = async function(){
         // FIFO: ochiq partiyani eng eskisidan qidirish
         ['purchase_item',    'idx_pi_prod_stock',     '(`product_id`, `stock_qty`, `id`)'],
         ['product_register', 'idx_pr_sale',           '(`sale_id`)'],
+        // Qarzdorlar ro'yxati: muddati kelganlarni tez topish uchun
+        ['sale',             'idx_sale_due',          '(`due_date`, `debt_sum`)'],
+        ['sale',             'idx_sale_client_debt',  '(`client_id`, `debt_sum`)'],
         ['sale',             'idx_sale_date',         '(`date`)'],
         ['sale_item',        'idx_si_sale',           '(`sale_id`)'],
         ['kassa_register',   'idx_kr_date',           '(`date`)'],
@@ -122,6 +131,26 @@ module.exports = async function(){
             console.log(`${table}.${name} indeksi qoshildi`);
         } catch { /* already exists */ }
     }
+
+    // Mijoz bilan muloqot tarixi (CRM eslatmalari).
+    // Har bir qo'ng'iroq/uchrashuv/va'da shu yerga yoziladi — qarz
+    // undirishda kim nima degani esdan chiqmasin.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS \`client_note\` (
+        \`id\`         INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        \`client_id\`  INT NOT NULL,
+        \`text\`       TEXT NOT NULL,
+        \`kind\`       VARCHAR(20) NOT NULL DEFAULT 'izoh',
+        \`remind_at\`  DATE DEFAULT NULL,
+        \`done\`       TINYINT(1) NOT NULL DEFAULT 0,
+        \`user_id\`    INT DEFAULT NULL,
+        \`user_name\`  VARCHAR(100) DEFAULT NULL,
+        \`created_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_note_client\` (\`client_id\`, \`created_at\`),
+        INDEX \`idx_note_remind\` (\`remind_at\`, \`done\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
 
     // Qoldiq "surat"lari (snapshot) — ommaviy o'zgarishdan oldin qoldiqlar
     // shu jadvalga nusxalanadi va kerak bo'lsa bir buyruq bilan qaytariladi

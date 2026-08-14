@@ -15,6 +15,8 @@ SaleModel.init({
   discount:     { type: DataTypes.DECIMAL(18, 2), defaultValue: 0 },
   paid_sum:     { type: DataTypes.DECIMAL(18, 2), defaultValue: 0 },
   debt_sum:     { type: DataTypes.DECIMAL(18, 2), defaultValue: 0 },
+  // Qarzni to'lash muddati — har sotuvga alohida belgilanadi
+  due_date:     { type: DataTypes.DATEONLY, allowNull: true },
   cashier_id:   { type: DataTypes.INTEGER, allowNull: true },
   status:       { type: DataTypes.ENUM('draft', 'completed', 'cancelled'), defaultValue: 'completed' },
   comment:      { type: DataTypes.TEXT, allowNull: true },

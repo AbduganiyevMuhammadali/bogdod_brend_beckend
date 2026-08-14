@@ -104,6 +104,10 @@ class SaleController {
     header.debt_usd     = toUSD(debtSum)
     header.status       = 'completed'
 
+    // Qarz muddati — faqat qarzli sotuvda saqlanadi. Naqd sotuvga
+    // muddat kelib qolsa (eski oynadan), uni tashlab yuboramiz.
+    header.due_date = debtSum > 0 && header.due_date ? header.due_date : null
+
     const sale = await SaleModel.create(header)
 
     const cashierName = req.currentUser?.fullname ?? req.currentUser?.username ?? null
