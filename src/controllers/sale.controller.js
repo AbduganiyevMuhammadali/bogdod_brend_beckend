@@ -112,6 +112,15 @@ class SaleController {
 
     const cashierName = req.currentUser?.fullname ?? req.currentUser?.username ?? null
 
+    // Chegirma butun chekka beriladi, foyda esa har mahsulot bo'yicha
+    // hisoblanadi. Shuning uchun chegirmani satrlar orasida ularning
+    // summasiga proporsional taqsimlaymiz.
+    //
+    // Busiz `product_register` ga chegirmasiz narx tushib, foyda
+    // hisobotida haqiqiydan katta foyda ko'rinardi (chegirma 99% ga
+    // yetganda farq juda katta bo'lardi).
+    const discountRatio = totalSum > 0 ? Math.min(discount / totalSum, 1) : 0
+
     // Process items: FIFO deduction + SaleItem creation
     // fifoMap stores deductions per SaleItem id for ProductRegister
     const saleItemsFifo = []
@@ -152,6 +161,11 @@ class SaleController {
 
     // ProductRegister — one row per FIFO batch portion (accurate cost per batch)
     for (const { item, deductions } of saleItemsFifo) {
+      // Chegirmadan keyingi haqiqiy narx. `item` bu yerda saqlangan
+      // SaleItem (yuqoridagi sikldagi kirish satri emas), shuning uchun
+      // narxni shu yerda qaytadan hisoblaymiz.
+      const netPrice = +(Number(item.price) * (1 - discountRatio)).toFixed(4)
+
       const regBase = {
         date:         header.date,
         sale_id:      sale.id,
@@ -160,13 +174,18 @@ class SaleController {
         product_id:   item.product_id ?? null,
         product_name: item.product_name,
         barcode:      item.barcode ?? null,
-        price:        item.price,
+        // Chegirmadan keyingi haqiqiy narx — hisobotdagi "o'rtacha narx"
+        // shu ustundan olinadi
+        price:        netPrice,
         price_type:   header.price_type || 'chakana',
         cashier_id:   header.cashier_id,
         cashier_name: cashierName,
         status:       'active',
       }
 
+      // `total_sum` — chegirmadan KEYINGI summa. Foyda hisoboti aynan
+      // shu ustundan hisoblanadi, shuning uchun bu yerga chegirmasiz
+      // narx yozilsa foyda soxta katta chiqadi.
       if (deductions.length > 0) {
         for (const d of deductions) {
           await ProductRegisterModel.create({
@@ -174,7 +193,7 @@ class SaleController {
             purchase_item_id: d.batchId,
             qty:        d.qty,
             cost_price: d.costPrice,
-            total_sum:  +(Number(item.price) * d.qty).toFixed(2),
+            total_sum:  +(netPrice * d.qty).toFixed(2),
           })
         }
       } else {
@@ -184,7 +203,7 @@ class SaleController {
           purchase_item_id: null,
           qty:        item.qty,
           cost_price: 0,
-          total_sum:  item.total_sum,
+          total_sum:  +(Number(item.total_sum) * (1 - discountRatio)).toFixed(2),
         })
       }
     }

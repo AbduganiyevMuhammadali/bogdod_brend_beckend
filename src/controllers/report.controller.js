@@ -36,7 +36,10 @@ class ReportController {
           where: { status: 'completed', date: dateWhere, sale_id: { [Op.not]: null } },
           attributes: [
             [fn('COUNT', col('id')),          'sales_count'],
-            [fn('SUM',   col('total_sum')),   'revenue'],
+            // Tushum — chegirmadan KEYINGI summa. `total_sum` tovarlarning
+            // yozilgan narxi bo'lgani uchun chegirmani ayiramiz, aks holda
+            // hisobotda haqiqatda olinmagan pul ko'rinardi.
+            [fn('SUM', literal('total_sum - COALESCE(discount, 0)')), 'revenue'],
             [fn('SUM',   col('paid_sum')),    'paid'],
             [fn('SUM',   col('debt_sum')),    'debt'],
             [fn('SUM',   col('item_count')),  'items'],
@@ -77,7 +80,8 @@ class ReportController {
       where: { status: 'completed', date: { [Op.gte]: today } },
       attributes: [
         [fn('HOUR', col('date')), 'hour'],
-        [fn('SUM', col('total_sum')), 'revenue'],
+        // Chegirmadan keyingi haqiqiy tushum
+        [fn('SUM', literal('total_sum - COALESCE(discount, 0)')), 'revenue'],
         [fn('COUNT', col('id')), 'count'],
       ],
       group: [fn('HOUR', col('date'))],
@@ -101,7 +105,16 @@ class ReportController {
         { model: SaleItemModel, as: 'items',   attributes: ['id', 'product_name', 'qty', 'price', 'total_sum'] },
       ],
     })
-    res.json(sales)
+
+    // `total_sum` — chegirmadan OLDINGI summa (tovarlarning yozilgan narxi).
+    // Hisobotda esa haqiqiy savdo kerak, shuning uchun chegirmani ayirib
+    // `net_sum` qo'shamiz. `total_sum` o'zi ham qoladi — eski
+    // chaqiruvchilar buzilmasin.
+    res.json(sales.map(s => {
+      const j = s.toJSON()
+      j.net_sum = +(Number(j.total_sum || 0) - Number(j.discount || 0)).toFixed(2)
+      return j
+    }))
   }
 
   // ── Product sales report ──────────────────────────────────────
@@ -152,12 +165,13 @@ class ReportController {
         'client_id',
         'client_name',
         [fn('COUNT', col('id')),          'sales_count'],
-        [fn('SUM',   col('total_sum')),   'total_sum'],
+        // Chegirmadan keyingi haqiqiy savdo
+        [fn('SUM', literal('total_sum - COALESCE(discount, 0)')), 'total_sum'],
         [fn('SUM',   col('paid_sum')),    'paid_sum'],
         [fn('SUM',   col('debt_sum')),    'debt_sum'],
       ],
       group:  ['client_id', 'client_name'],
-      order:  [[fn('SUM', col('total_sum')), 'DESC']],
+      order:  [[fn('SUM', literal('total_sum - COALESCE(discount, 0)')), 'DESC']],
       raw: true,
     })
 
@@ -203,14 +217,15 @@ class ReportController {
         'cashier_id',
         'cashier_name',
         [fn('COUNT', col('id')),          'sales_count'],
-        [fn('SUM',   col('total_sum')),   'total_sum'],
+        // Chegirmadan keyingi haqiqiy savdo
+        [fn('SUM', literal('total_sum - COALESCE(discount, 0)')), 'total_sum'],
         [fn('SUM',   col('paid_sum')),    'paid_sum'],
         [fn('SUM',   col('debt_sum')),    'debt_sum'],
         [fn('SUM',   col('item_count')),  'items_sold'],
         [fn('SUM',   col('discount')),    'total_discount'],
       ],
       group:  ['cashier_id', 'cashier_name'],
-      order:  [[fn('SUM', col('total_sum')), 'DESC']],
+      order:  [[fn('SUM', literal('total_sum - COALESCE(discount, 0)')), 'DESC']],
       raw: true,
     })
 
