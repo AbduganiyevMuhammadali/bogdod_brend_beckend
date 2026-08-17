@@ -33,7 +33,6 @@ class SaleController {
     //
     // Shtrix-kod skanerdan boshidagi nol tushib kelishi mumkin, shuning
     // uchun barcha shakllari bo'yicha qidiramiz (barcodeVariants).
-    let saleIdsByItem = null
     if (search) {
       const q = String(search).trim()
       const kodlar = barcodeVariants(q)
@@ -51,12 +50,26 @@ class SaleController {
         raw: true,
         limit: 500,
       }).catch(() => [])
-      saleIdsByItem = items.map(i => i.sale_id).filter(Boolean)
+      const saleIdsByItem = items.map(i => i.sale_id).filter(Boolean)
+
+      // Mijozlarni ham oldindan topamiz.
+      //
+      // `$client.name$` ishlatib bo'lmaydi: `findAndCountAll` + `limit`
+      // bilan Sequelize alohida COUNT so'rovini JOIN'siz yasaydi va
+      // "Unknown column 'client.name'" xatosi chiqadi. Shuning uchun
+      // mijoz id'larini alohida so'rov bilan olamiz.
+      const clients = await ClientModel.findAll({
+        attributes: ['id'],
+        where: { name: { [Op.like]: `%${q}%` } },
+        raw: true,
+        limit: 200,
+      }).catch(() => [])
+      const clientIds = clients.map(c => c.id)
 
       where[Op.or] = [
-        { '$client.name$': { [Op.like]: `%${q}%` } },
         { doc_number: isNaN(q) ? -1 : Number(q) },
-        ...(saleIdsByItem.length ? [{ id: { [Op.in]: saleIdsByItem } }] : []),
+        ...(clientIds.length    ? [{ client_id: { [Op.in]: clientIds } }]  : []),
+        ...(saleIdsByItem.length ? [{ id: { [Op.in]: saleIdsByItem } }]    : []),
       ]
     }
 
