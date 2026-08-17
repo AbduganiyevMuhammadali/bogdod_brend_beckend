@@ -10,6 +10,7 @@ const ProductRegisterModel  = require('../models/product_register.model')
 const KassaRegisterModel    = require('../models/kassa_register.model')
 const HttpException         = require('../utils/HttpException.utils')
 const { dateRange }         = require('../utils/dateRange.utils')
+const { barcodeVariants }   = require('../utils/barcode.utils')
 
 class SaleController {
 
@@ -24,10 +25,38 @@ class SaleController {
     // tongdagi savdolar tushib qolardi.
     const dr = dateRange(Op, date_from, date_to)
     if (dr) where.date = dr
+    // Qidiruv: mijoz nomi, hujjat raqami, TOVAR NOMI va SHTRIX-KOD.
+    //
+    // Qaytarishlarda kassir odatda tovarni qo'lida ushlab turadi va uning
+    // yorlig'ini skanerlaydi — shuning uchun shtrix-kod bo'yicha o'sha
+    // tovar sotilgan hujjatni topa olish kerak.
+    //
+    // Shtrix-kod skanerdan boshidagi nol tushib kelishi mumkin, shuning
+    // uchun barcha shakllari bo'yicha qidiramiz (barcodeVariants).
+    let saleIdsByItem = null
     if (search) {
+      const q = String(search).trim()
+      const kodlar = barcodeVariants(q)
+
+      // Tovar satrlari bo'yicha mos keladigan sotuvlarni topamiz
+      const items = await SaleItemModel.findAll({
+        attributes: ['sale_id'],
+        where: {
+          [Op.or]: [
+            { product_name: { [Op.like]: `%${q}%` } },
+            ...kodlar.map(k => ({ barcode: k })),
+          ],
+        },
+        group: ['sale_id'],
+        raw: true,
+        limit: 500,
+      }).catch(() => [])
+      saleIdsByItem = items.map(i => i.sale_id).filter(Boolean)
+
       where[Op.or] = [
-        { '$client.name$': { [Op.like]: `%${search}%` } },
-        { doc_number: isNaN(search) ? -1 : Number(search) },
+        { '$client.name$': { [Op.like]: `%${q}%` } },
+        { doc_number: isNaN(q) ? -1 : Number(q) },
+        ...(saleIdsByItem.length ? [{ id: { [Op.in]: saleIdsByItem } }] : []),
       ]
     }
 
@@ -42,7 +71,15 @@ class SaleController {
         { model: SaleItemModel, as: 'items',   attributes: ['id'] },
       ],
     })
-    res.json({ total: count, page: Number(page), data: rows })
+
+    res.json({
+      total: count,
+      page: Number(page),
+      data: rows,
+      // Qidiruv shtrix-kod/tovar bo'yicha mos kelganini frontend biladi —
+      // topilgan hujjatni darhol ochib, o'sha tovarni belgilab bera oladi
+      matched_query: search ? String(search).trim() : null,
+    })
   }
 
   getById = async (req, res) => {
