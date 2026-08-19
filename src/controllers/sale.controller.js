@@ -37,6 +37,29 @@ class SaleController {
       const q = String(search).trim()
       const kodlar = barcodeVariants(q)
 
+      // Shtrix-kod bo'yicha MAHSULOTNI topamiz.
+      //
+      // `sale_item.barcode` ga savatga qo'shilgan paytdagi BIRINCHI kod
+      // yoziladi (`barcodes[0]`). Tovarda bir necha kod bo'lsa va mijoz
+      // ikkinchisi bilan kelsa, faqat `sale_item.barcode` bo'yicha
+      // qidirish uni topmaydi. Shuning uchun avval mahsulotni aniqlab,
+      // keyin `product_id` bo'yicha ham qidiramiz.
+      let productIds = []
+      if (/^\d{6,}$/.test(q)) {
+        const prods = await ProductModel.findAll({
+          attributes: ['id', 'barcodes'],
+          where: { [Op.or]: kodlar.map(k => ({ barcodes: { [Op.like]: `%${k}%` } })) },
+          raw: true,
+          limit: 50,
+        }).catch(() => [])
+        // JSON massiv ichida to'liq moslikni tekshiramiz — substring emas
+        productIds = prods.filter(p => {
+          let list = []
+          try { list = JSON.parse(p.barcodes) || [] } catch { /* buzuq */ }
+          return (list || []).some(b => kodlar.includes(String(b).trim()))
+        }).map(p => p.id)
+      }
+
       // Tovar satrlari bo'yicha mos keladigan sotuvlarni topamiz
       const items = await SaleItemModel.findAll({
         attributes: ['sale_id'],
@@ -44,6 +67,7 @@ class SaleController {
           [Op.or]: [
             { product_name: { [Op.like]: `%${q}%` } },
             ...kodlar.map(k => ({ barcode: k })),
+            ...(productIds.length ? [{ product_id: { [Op.in]: productIds } }] : []),
           ],
         },
         group: ['sale_id'],
