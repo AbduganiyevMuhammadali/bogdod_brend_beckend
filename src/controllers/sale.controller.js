@@ -33,6 +33,7 @@ class SaleController {
     //
     // Shtrix-kod skanerdan boshidagi nol tushib kelishi mumkin, shuning
     // uchun barcha shakllari bo'yicha qidiramiz (barcodeVariants).
+    let aniqSaleIds = []
     if (search) {
       const q = String(search).trim()
       const kodlar = barcodeVariants(q)
@@ -60,9 +61,14 @@ class SaleController {
         }).map(p => p.id)
       }
 
-      // Tovar satrlari bo'yicha mos keladigan sotuvlarni topamiz
+      // Tovar satrlari bo'yicha mos keladigan sotuvlarni topamiz.
+      //
+      // `aniq` — skanerlangan kod satrga AYNAN mos kelgan hujjatlar.
+      // Ular natijada birinchi turishi kerak: qaytarishda kassir aynan
+      // o'sha tovarni qidiryapti, boshqa sotuvlar esa shu mahsulotning
+      // eski savdolari va ular pastroqda tursin.
       const items = await SaleItemModel.findAll({
-        attributes: ['sale_id'],
+        attributes: ['sale_id', 'barcode', 'product_id'],
         where: {
           [Op.or]: [
             { product_name: { [Op.like]: `%${q}%` } },
@@ -70,11 +76,18 @@ class SaleController {
             ...(productIds.length ? [{ product_id: { [Op.in]: productIds } }] : []),
           ],
         },
-        group: ['sale_id'],
         raw: true,
         limit: 500,
       }).catch(() => [])
-      const saleIdsByItem = items.map(i => i.sale_id).filter(Boolean)
+
+      const aniq = new Set()
+      const saleIdsByItem = []
+      for (const i of items) {
+        if (!i.sale_id) continue
+        if (!saleIdsByItem.includes(i.sale_id)) saleIdsByItem.push(i.sale_id)
+        if (i.barcode && kodlar.includes(String(i.barcode).trim())) aniq.add(i.sale_id)
+      }
+      aniqSaleIds = [...aniq]
 
       // Mijozlarni ham oldindan topamiz.
       //
@@ -109,13 +122,28 @@ class SaleController {
       ],
     })
 
+    // Skanerlangan kod AYNAN mos kelgan hujjatlarni oldinga chiqaramiz.
+    // Qolganlari — shu mahsulotning eski savdolari, ular pastroqda.
+    let data = rows
+    if (aniqSaleIds.length) {
+      const aniqSet = new Set(aniqSaleIds)
+      data = [...rows].sort((a, b) => {
+        const av = aniqSet.has(a.id) ? 0 : 1
+        const bv = aniqSet.has(b.id) ? 0 : 1
+        return av - bv
+      })
+    }
+
     res.json({
       total: count,
       page: Number(page),
-      data: rows,
+      data,
       // Qidiruv shtrix-kod/tovar bo'yicha mos kelganini frontend biladi —
       // topilgan hujjatni darhol ochib, o'sha tovarni belgilab bera oladi
       matched_query: search ? String(search).trim() : null,
+      // Kod aynan mos kelgan hujjatlar — frontend birinchisini avtomatik
+      // ochadi, garchi ro'yxatda bir nechta bo'lsa ham
+      exact_ids: aniqSaleIds,
     })
   }
 

@@ -132,6 +132,27 @@ module.exports = async function(){
         } catch { /* already exists */ }
     }
 
+    // Telegram bot bilan bog'lanish. Har do'kon o'z serverida, bot esa
+    // bitta va umumiy — bog'lanish shu jadval orqali saqlanadi.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS \`bot_link\` (
+        \`id\`              INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        \`chat_id\`         VARCHAR(40)  DEFAULT NULL,
+        \`chat_name\`       VARCHAR(200) DEFAULT NULL,
+        \`pair_code\`       VARCHAR(10)  DEFAULT NULL,
+        \`code_expires_at\` DATETIME     DEFAULT NULL,
+        \`token\`           VARCHAR(120) DEFAULT NULL,
+        \`active\`          TINYINT(1)   NOT NULL DEFAULT 1,
+        \`daily\`           TINYINT(1)   NOT NULL DEFAULT 1,
+        \`last_seen\`       DATETIME     DEFAULT NULL,
+        \`created_by\`      INT          DEFAULT NULL,
+        \`created_at\`      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\`      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_bot_token\` (\`token\`),
+        INDEX \`idx_bot_chat\`  (\`chat_id\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+
     // Mijoz bilan muloqot tarixi (CRM eslatmalari).
     // Har bir qo'ng'iroq/uchrashuv/va'da shu yerga yoziladi — qarz
     // undirishda kim nima degani esdan chiqmasin.

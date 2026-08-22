@@ -16,6 +16,7 @@ const notificationRouter = require('../routes/notification.route');
 const inventoryRouter    = require('../routes/inventory.route');
 const backupRouter       = require('../routes/backup.route');
 const debtorRouter       = require('../routes/debtor.route');
+const botRouter          = require('../routes/bot.route');
 const snapshotRouter     = require('../routes/snapshot.route');
 const HttpException = require('../utils/HttpException.utils');
 
@@ -44,6 +45,7 @@ module.exports = async function(app){
         app.use('/api/v1/notifications', notificationRouter);
         app.use('/api/v1/backup',        backupRouter);
         app.use('/api/v1/debtors',       debtorRouter);
+        app.use('/api/v1/bot',           botRouter);
         app.use('/api/v1/snapshots',     snapshotRouter);
             
         // 404 error
