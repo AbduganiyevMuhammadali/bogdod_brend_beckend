@@ -33,6 +33,10 @@ module.exports = async function(){
         // Mijoz CRM maydonlari
         ['client',           'status',             "VARCHAR(20) NOT NULL DEFAULT 'faol'"],
         ['client',           'tags',               'TEXT DEFAULT NULL'],
+        // Bot: kunlik xabar soati (har chat o'zi tanlaydi)
+        ['bot_link',         'daily_hour',         'INT NOT NULL DEFAULT 21'],
+        ['bot_link',         'chat_username',      'VARCHAR(100) DEFAULT NULL'],
+        ['bot_link',         'created_by_name',    'VARCHAR(100) DEFAULT NULL'],
     ];
 
     // supplier jadvalini yaratish (mavjud bo'lmasa)

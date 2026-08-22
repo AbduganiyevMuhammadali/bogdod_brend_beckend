@@ -17,6 +17,16 @@ function kunOraligi(sana) {
   const e = new Date(d); e.setHours(23, 59, 59, 999)
   return { [Op.between]: [b, e] }
 }
+// Davr oralig'i: kun / hafta / oy
+function davrOraligi(davr) {
+  const now = new Date()
+  const b = new Date(now); b.setHours(0, 0, 0, 0)
+  if (davr === 'hafta') b.setDate(b.getDate() - 6)
+  else if (davr === 'oy') b.setDate(1)
+  const e = new Date(now); e.setHours(23, 59, 59, 999)
+  return { [Op.between]: [b, e] }
+}
+
 function bugunKey() {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
@@ -40,6 +50,8 @@ class BotController {
       pair_code: kod,
       code_expires_at: muddat,
       created_by: req.currentUser?.id ?? null,
+      // Kartochkada "kim ulagan" ko'rinishi uchun
+      created_by_name: req.currentUser?.fullname || req.currentUser?.username || null,
     })
 
     res.json({
@@ -56,7 +68,7 @@ class BotController {
    * Kod to'g'ri bo'lsa uzoq muddatli token qaytaradi.
    */
   pair = async (req, res) => {
-    const { code, chat_id, chat_name } = req.body
+    const { code, chat_id, chat_name, chat_username } = req.body
     if (!code || !chat_id) throw new HttpException(400, 'code va chat_id majburiy')
 
     const link = await BotLinkModel.findOne({
@@ -73,6 +85,7 @@ class BotController {
     await link.update({
       chat_id:   String(chat_id),
       chat_name: chat_name ? String(chat_name).slice(0, 200) : null,
+      chat_username: chat_username ? String(chat_username).slice(0, 100) : null,
       token,
       pair_code: null,
       code_expires_at: null,
@@ -210,11 +223,228 @@ class BotController {
     })))
   }
 
+  /**
+   * GET /api/v1/bot/period?p=kun|hafta|oy
+   * Tanlangan davr bo'yicha savdo va foyda.
+   */
+  period = async (req, res) => {
+    const davr = ['kun', 'hafta', 'oy'].includes(req.query.p) ? req.query.p : 'kun'
+    const oraliq = davrOraligi(davr)
+
+    const [k] = await KassaRegisterModel.findAll({
+      where: { status: 'completed', date: oraliq, sale_id: { [Op.not]: null } },
+      attributes: [
+        [fn('COUNT', col('id')), 'sotuvlar'],
+        [fn('SUM', literal('total_sum - COALESCE(discount, 0)')), 'tushum'],
+        [fn('SUM', col('debt_sum')), 'qarz'],
+        [fn('SUM', col('item_count')), 'tovarlar'],
+        [fn('SUM', col('discount')), 'chegirma'],
+      ],
+      raw: true,
+    })
+
+    const [p] = await ProductRegisterModel.findAll({
+      where: { status: 'active', date: oraliq },
+      attributes: [
+        [fn('SUM', col('total_sum')), 'savdo'],
+        [fn('SUM', literal('cost_price * qty')), 'tannarx'],
+      ],
+      raw: true,
+    })
+    const savdo = Number(p?.savdo) || 0
+    const tannarx = Number(p?.tannarx) || 0
+
+    res.json({
+      shop: config.db_name, davr,
+      sotuvlar: Number(k?.sotuvlar) || 0,
+      tushum:   Number(k?.tushum)   || 0,
+      qarz:     Number(k?.qarz)     || 0,
+      tovarlar: Number(k?.tovarlar) || 0,
+      chegirma: Number(k?.chegirma) || 0,
+      savdo, tannarx,
+      foyda: savdo - tannarx,
+      marja: savdo > 0 ? +((savdo - tannarx) / savdo * 100).toFixed(1) : 0,
+    })
+  }
+
+  /** GET /api/v1/bot/top?p=kun|hafta|oy — eng ko'p sotilgan tovarlar */
+  top = async (req, res) => {
+    const davr = ['kun', 'hafta', 'oy'].includes(req.query.p) ? req.query.p : 'kun'
+    const rows = await ProductRegisterModel.findAll({
+      where: { status: 'active', date: davrOraligi(davr) },
+      attributes: [
+        'product_name',
+        [fn('SUM', col('qty')), 'dona'],
+        [fn('SUM', col('total_sum')), 'savdo'],
+        [fn('SUM', literal('total_sum - cost_price * qty')), 'foyda'],
+      ],
+      group: ['product_name'],
+      order: [[literal('savdo'), 'DESC']],
+      limit: 10,
+      raw: true,
+    }).catch(() => [])
+
+    res.json({ davr, data: rows.map(r => ({
+      name: r.product_name,
+      dona: Number(r.dona) || 0,
+      savdo: Number(r.savdo) || 0,
+      foyda: Number(r.foyda) || 0,
+    })) })
+  }
+
+  /** GET /api/v1/bot/cashiers?p=... — kassirlar hisoboti */
+  cashiers = async (req, res) => {
+    const davr = ['kun', 'hafta', 'oy'].includes(req.query.p) ? req.query.p : 'kun'
+    const rows = await KassaRegisterModel.findAll({
+      where: { status: 'completed', date: davrOraligi(davr), sale_id: { [Op.not]: null } },
+      attributes: [
+        'cashier_name',
+        [fn('COUNT', col('id')), 'sotuvlar'],
+        [fn('SUM', literal('total_sum - COALESCE(discount, 0)')), 'tushum'],
+        [fn('SUM', col('discount')), 'chegirma'],
+      ],
+      group: ['cashier_name'],
+      order: [[literal('tushum'), 'DESC']],
+      raw: true,
+    }).catch(() => [])
+
+    res.json({ davr, data: rows.map(r => ({
+      name: r.cashier_name || 'Noma\'lum',
+      sotuvlar: Number(r.sotuvlar) || 0,
+      tushum: Number(r.tushum) || 0,
+      chegirma: Number(r.chegirma) || 0,
+    })) })
+  }
+
+  /** GET /api/v1/bot/cash — to'lov turlari bo'yicha bugungi taqsimot */
+  cash = async (req, res) => {
+    const rows = await KassaRegisterModel.findAll({
+      where: { status: 'completed', date: kunOraligi(), sale_id: { [Op.not]: null } },
+      attributes: [
+        'payment_type',
+        [fn('COUNT', col('id')), 'soni'],
+        [fn('SUM', col('paid_sum')), 'summa'],
+      ],
+      group: ['payment_type'],
+      raw: true,
+    }).catch(() => [])
+
+    // Qarz to'lovlari (alohida keladi)
+    const [qt] = await KassaRegisterModel.findAll({
+      where: { status: 'completed', date: kunOraligi(), sale_id: null },
+      attributes: [[fn('SUM', col('paid_sum')), 'summa']],
+      raw: true,
+    })
+
+    res.json({
+      turlar: rows.map(r => ({
+        tur: r.payment_type || 'Naqd',
+        soni: Number(r.soni) || 0,
+        summa: Number(r.summa) || 0,
+      })),
+      qarz_tolovlari: Number(qt?.summa) || 0,
+    })
+  }
+
+  /** GET /api/v1/bot/find-product?q=... — tovar qidirish */
+  findProduct = async (req, res) => {
+    const q = String(req.query.q || '').trim()
+    if (q.length < 2) return res.json([])
+
+    const { barcodeVariants } = require('../utils/barcode.utils')
+    const kodlar = barcodeVariants(q)
+
+    const rows = await ProductModel.findAll({
+      where: {
+        [Op.or]: [
+          { name: { [Op.like]: `%${q}%` } },
+          ...kodlar.map(k => ({ barcodes: { [Op.like]: `%${k}%` } })),
+        ],
+      },
+      attributes: ['id', 'name', 'qty', 'min_qty', 'retail_price', 'barcodes'],
+      limit: 8,
+      raw: true,
+    }).catch(() => [])
+
+    res.json(rows.map(r => {
+      let kod = null
+      try { kod = (JSON.parse(r.barcodes) || [])[0] || null } catch {}
+      return {
+        name: r.name,
+        qty: Number(r.qty) || 0,
+        min: Number(r.min_qty) || 0,
+        price: Number(r.retail_price) || 0,
+        barcode: kod,
+      }
+    }))
+  }
+
+  /** GET /api/v1/bot/find-client?q=... — mijoz qidirish */
+  findClient = async (req, res) => {
+    const q = String(req.query.q || '').trim()
+    if (q.length < 2) return res.json([])
+
+    const rows = await ClientModel.findAll({
+      where: {
+        [Op.or]: [
+          { name:  { [Op.like]: `%${q}%` } },
+          { phone: { [Op.like]: `%${q}%` } },
+        ],
+      },
+      attributes: ['id', 'name', 'phone', 'balance'],
+      limit: 8,
+      raw: true,
+    }).catch(() => [])
+
+    // Har mijozning qarz muddatlari
+    const ids = rows.map(r => r.id)
+    let duesByClient = new Map()
+    if (ids.length) {
+      const [dues] = await sequelize.query(
+        `SELECT client_id, MIN(due_date) muddat, COUNT(*) hujjat
+           FROM sale WHERE debt_sum > 0 AND status <> 'cancelled'
+            AND client_id IN (${ids.map(Number).join(',')})
+          GROUP BY client_id`
+      ).catch(() => [[]])
+      duesByClient = new Map((dues || []).map(d => [d.client_id, d]))
+    }
+
+    res.json(rows.map(r => {
+      const d = duesByClient.get(r.id)
+      return {
+        name: r.name, phone: r.phone,
+        balance: Number(r.balance) || 0,
+        qarz: Number(r.balance) < 0 ? Math.abs(Number(r.balance)) : 0,
+        muddat: d?.muddat ? String(d.muddat).slice(0, 10) : null,
+        hujjatlar: Number(d?.hujjat) || 0,
+      }
+    }))
+  }
+
+  /** PATCH /api/v1/bot/links/:id/daily — kunlik xabar vaqti va holati */
+  setDaily = async (req, res) => {
+    const link = await BotLinkModel.findByPk(req.params.id)
+    if (!link) throw new HttpException(404, 'Bog\'lanish topilmadi')
+
+    const patch = {}
+    if (req.body.daily !== undefined) patch.daily = !!req.body.daily
+    if (req.body.daily_hour !== undefined) {
+      const h = Number(req.body.daily_hour)
+      if (!Number.isInteger(h) || h < 0 || h > 23) {
+        throw new HttpException(400, 'Soat 0 dan 23 gacha bo\'lishi kerak')
+      }
+      patch.daily_hour = h
+    }
+    await link.update(patch)
+    res.json({ ok: true, daily: link.daily, daily_hour: link.daily_hour })
+  }
+
   /** GET /api/v1/bot/links — bog'langan chatlar (Sozlamalar uchun) */
   links = async (req, res) => {
     const rows = await BotLinkModel.findAll({
       where: { chat_id: { [Op.not]: null } },
-      attributes: ['id', 'chat_id', 'chat_name', 'active', 'daily', 'last_seen', 'created_at'],
+      attributes: ['id', 'chat_id', 'chat_name', 'chat_username', 'created_by_name',
+                   'active', 'daily', 'daily_hour', 'last_seen', 'created_at'],
       order: [['id', 'DESC']],
     })
     res.json(rows)

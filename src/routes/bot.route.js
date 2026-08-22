@@ -12,6 +12,7 @@ const ROLLAR = ['Dasturchi', 'Admin']
 router.post('/pair-code',    auth(), role(...ROLLAR), awaitHF(ctrl.createPairCode))
 router.get('/links',         auth(), role(...ROLLAR), awaitHF(ctrl.links))
 router.delete('/links/:id',  auth(), role(...ROLLAR), awaitHF(ctrl.unlink))
+router.patch('/links/:id/daily', auth(), role(...ROLLAR), awaitHF(ctrl.setDaily))
 
 // ── Bot chaqiradi ───────────────────────────────────────────────────
 // `pair` auth talab qilmaydi: 6 xonali kodning o'zi tasdiq bo'lib
@@ -20,6 +21,12 @@ router.post('/pair',         awaitHF(ctrl.pair))
 
 // Qolganlari bot tokeni bilan — faqat o'qish
 router.get('/summary',       botAuth, awaitHF(ctrl.summary))
+router.get('/period',        botAuth, awaitHF(ctrl.period))
+router.get('/top',           botAuth, awaitHF(ctrl.top))
+router.get('/cashiers',      botAuth, awaitHF(ctrl.cashiers))
+router.get('/cash',          botAuth, awaitHF(ctrl.cash))
+router.get('/find-product',  botAuth, awaitHF(ctrl.findProduct))
+router.get('/find-client',   botAuth, awaitHF(ctrl.findClient))
 router.get('/debtors',       botAuth, awaitHF(ctrl.debtors))
 router.get('/low-stock',     botAuth, awaitHF(ctrl.lowStock))
 router.get('/daily-targets', botAuth, awaitHF(ctrl.dailyTargets))
