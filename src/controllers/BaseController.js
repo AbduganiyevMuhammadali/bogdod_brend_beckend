@@ -8,6 +8,7 @@ class BaseController{
             throw new HttpException(400, req.mf('Validation faild'), errors);
         }
     }
-}
+} 
+
 
 module.exports = BaseController;
