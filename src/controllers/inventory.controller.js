@@ -543,6 +543,8 @@ class InventoryController extends BaseController {
     }
 
     let totalExpected = 0, totalCounted = 0, totalDiffSum = 0;
+    // Sanoq davomida sotilgan tovarlar — javobda kassirga ko'rsatiladi
+    let sanoqDavomidaSotildi = 0;
 
     await sequelize.transaction(async (t) => {
       // Mahsulotlar va partiyalarni oldindan bitta so'rovda olamiz.
@@ -558,6 +560,48 @@ class InventoryController extends BaseController {
           })
         : [];
       const productById = new Map(productList.map(p => [p.id, p]));
+
+      // ── SANOQ DAVOMIDA SOTILGAN TOVARLAR ─────────────────────────
+      //
+      // Sanoq bir necha soat, ba'zan bir necha kun davom etadi va shu
+      // vaqtda do'kon ishlashda davom etadi. Kassir tovarni sanab
+      // qo'yadi, keyin o'sha tovar sotiladi.
+      //
+      // Agar buni hisobga olmasak, yakunlashda qoldiq SANALGAN
+      // miqdorga tenglashtiriladi va sotilgan tovar qoldiqqa qayta
+      // qo'shilib qoladi — yo'q tovar bor bo'lib ko'rinadi.
+      //
+      // Shuning uchun: yangi qoldiq = sanalgan − (sanoq boshlangandan
+      // keyin sotilgan). `rollback` metodi ham xuddi shu mantiqda
+      // ishlaydi.
+      const boshlanish = doc.created_at || doc.createdAt;
+      let sotilgan = new Map();
+      if (boshlanish && itemProductIds.length) {
+        const SaleItemModel = require('../models/sale_item.model');
+        const SaleModel     = require('../models/sale.model');
+        const rows = await SaleItemModel.findAll({
+          attributes: [
+            'product_id',
+            [sequelize.fn('SUM', sequelize.col('SaleItemModel.qty')), 'q'],
+          ],
+          where: { product_id: { [Op.in]: itemProductIds } },
+          include: [{
+            model: SaleModel,
+            as: 'sale',
+            attributes: [],
+            required: true,
+            where: {
+              date: { [Op.gte]: boshlanish },
+              status: { [Op.or]: [{ [Op.is]: null }, { [Op.ne]: 'cancelled' }] },
+            },
+          }],
+          group: ['product_id'],
+          raw: true,
+          transaction: t,
+        }).catch(() => []);
+        sotilgan = new Map(rows.map(r => [r.product_id, Number(r.q) || 0]));
+        for (const v of sotilgan.values()) sanoqDavomidaSotildi += v;
+      }
 
       const allBatches = itemProductIds.length
         ? await PurchaseItemModel.findAll({
@@ -590,7 +634,12 @@ class InventoryController extends BaseController {
         const product = productById.get(item.product_id);
         if (!product) continue;
 
-        qtyUpdates.push({ id: product.id, qty: counted });
+        // Sanoqdan keyin sotilgani ayiriladi — aks holda sotilgan tovar
+        // omborga qaytib qo'shilardi
+        const keyinSotilgan = sotilgan.get(product.id) || 0;
+        const yangiQoldiq   = Math.max(0, counted - keyinSotilgan);
+
+        qtyUpdates.push({ id: product.id, qty: yangiQoldiq });
 
         // FIFO partiyalarini sanalgan miqdorga tenglashtiramiz.
         //
@@ -602,9 +651,12 @@ class InventoryController extends BaseController {
 
         const batchTotal = batches.reduce((a, b) => a + (Number(b.stock_qty) || 0), 0);
 
-        if (batchTotal > counted) {
+        // Partiyalar ham YANGI qoldiqqa tenglashadi (sotilgani ayirilgan),
+        // aks holda partiyalar yig'indisi mahsulot qoldig'idan farq qilib
+        // qolardi va keyingi FIFO hisoblari buzilardi.
+        if (batchTotal > yangiQoldiq) {
           // Ortiqcha qoldiqni eng eski partiyalardan yechamiz
-          let toRemove = batchTotal - counted;
+          let toRemove = batchTotal - yangiQoldiq;
           for (const b of batches) {
             if (toRemove <= 0) break;
             const have = Number(b.stock_qty) || 0;
@@ -613,8 +665,8 @@ class InventoryController extends BaseController {
             await b.update({ stock_qty: have - take }, { transaction: t });
             toRemove -= take;
           }
-        } else if (batchTotal < counted) {
-          const add = counted - batchTotal;
+        } else if (batchTotal < yangiQoldiq) {
+          const add = yangiQoldiq - batchTotal;
           if (batches.length) {
             // Yetishmaganini oxirgi (eng yangi) partiyaga qo'shamiz —
             // tannarx eng so'nggi kelgan narxga yaqin bo'ladi
@@ -687,7 +739,9 @@ class InventoryController extends BaseController {
       include: [{ model: InventoryItemModel, as: 'items' }],
     });
     // snapshot_id — kerak bo'lsa shu nuqtaga qaytish uchun
-    res.json({ ...full.toJSON(), snapshot_id: snapshotId, nolga_tushdi: willZero });
+    res.json({ ...full.toJSON(), snapshot_id: snapshotId,
+               sanoq_davomida_sotildi: sanoqDavomidaSotildi,
+               nolga_tushdi: willZero });
   };
 
   // Yakunlashni QAYTARISH (rollback).
