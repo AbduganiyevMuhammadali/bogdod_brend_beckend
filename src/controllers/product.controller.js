@@ -252,11 +252,52 @@ class ProductController extends BaseController {
       });
       const taken = new Set(takenRows.map(r => r.code));
 
+      // ── Mavjud tovarlarni oldindan topamiz ──────────────────────
+      //
+      // Do'konga bir xil tovar qayta-qayta keladi. Har safar YANGI yozuv
+      // yaratilsa, mahsulotlar ro'yxati bir necha baravar shishib ketadi
+      // (bir tovar 3-4 marta takrorlanadi) va sahifa sekinlashadi.
+      //
+      // Shuning uchun: nomi aynan mos keladigan tovar bo'lsa, yangisini
+      // yaratmaymiz — mavjudining qoldig'ini oshiramiz va yangi partiya
+      // qo'shamiz (FIFO tannarx to'g'ri saqlanadi).
+      const nomlar = [...new Set(
+        expanded.map(e => (e.data.name || e.data.general_name || '').toString().trim())
+                .filter(Boolean)
+      )];
+
+      const mavjudlar = nomlar.length
+        ? await ProductModel.findAll({
+            where: { name: { [Op.in]: nomlar } },
+            transaction: t,
+          })
+        : [];
+      // Nom bo'yicha xarita — katta-kichik harf farqi hisobga olinmaydi
+      const nomXarita = new Map();
+      for (const m of mavjudlar) {
+        const kalit = String(m.name).trim().toLowerCase();
+        if (!nomXarita.has(kalit)) nomXarita.set(kalit, m);
+      }
+
       const toCreate = [];
+      const mavjudgaQoshildi = [];   // [{ product, qty, cost, barcodes }]
+
       for (const e of expanded) {
         const data = this._pick(e.data);
         data.name = (data.name || data.general_name || '').toString().trim();
         if (!data.general_name) data.general_name = data.name;
+
+        // Shu nomli tovar allaqachon bormi
+        const bor = nomXarita.get(data.name.toLowerCase());
+        if (bor) {
+          mavjudgaQoshildi.push({
+            product: bor,
+            qty:  e.qty,
+            cost: Number(e.data.cost_price) || 0,
+            barcodes: e.barcodes,
+          });
+          continue;
+        }
 
         // Kod bo'sh bo'lsa yasaymiz; band bo'lsa keyingisiga o'tamiz
         if (!data.code) {
@@ -272,6 +313,9 @@ class ProductController extends BaseController {
         data.qty = 0;   // qoldiq kirim hujjati orqali qo'shiladi
 
         toCreate.push({ data, qty: e.qty, cost: Number(e.data.cost_price) || 0 });
+        // Shu partiya ichida ikkinchi marta kelsa ham takrorlanmasin —
+        // lekin id hali yo'q, shuning uchun keyin to'ldiramiz
+        nomXarita.set(data.name.toLowerCase(), null);
       }
 
       // bitta INSERT. MySQL da bulkCreate ketma-ket auto-increment
@@ -293,6 +337,24 @@ class ProductController extends BaseController {
       // tranzaksiyani shu yerda to'xtatamiz.
       if (created.some(c => !c.product.id)) {
         throw new HttpException(500, 'Mahsulot id\'lari olinmadi — kiritish bekor qilindi');
+      }
+
+      // ── Mavjud tovarlar: yangi yozuv emas, qoldiq oshadi ──────────
+      //
+      // Shtrix-kod ham qo'shiladi: har kelishda yangi yorliq bosilsa,
+      // eskisi ham ishlashda davom etsin.
+      for (const m of mavjudgaQoshildi) {
+        if (m.barcodes && m.barcodes.length) {
+          const eski = Array.isArray(m.product.barcodes) ? m.product.barcodes : [];
+          const yangi = [...new Set([...eski, ...m.barcodes.map(b => String(b).trim())])]
+            .filter(Boolean);
+          if (yangi.length !== eski.length) {
+            await m.product.update({ barcodes: yangi }, { transaction: t });
+          }
+        }
+        // `created` ga qo'shamiz — kirim hujjati va qoldiq bir joyda
+        // hisoblanadi, ikkita alohida yo'l bo'lmasin
+        created.push({ product: m.product, qty: m.qty, cost: m.cost, mavjud: true });
       }
 
       // Qoldiqli mahsulotlar uchun bitta kirim hujjati
@@ -335,23 +397,45 @@ class ProductController extends BaseController {
 
         // Qoldiqni yozish. Har mahsulot uchun alohida UPDATE o'rniga
         // bir nechta CASE bilan bitta so'rov — 500 ta tovarda sezilarli.
-        const ids  = withQty.map(c => c.product.id);
-        const cases = withQty
-          .map(c => `WHEN ${Number(c.product.id)} THEN ${Number(c.qty)}`)
+        //
+        // `qty = qty + N` (almashtirish emas!): mavjud tovarga yangi
+        // partiya kelganda eski qoldiq saqlanib, ustiga qo'shiladi.
+        // Yangi tovarda qty=0 bo'lgani uchun natija baribir to'g'ri.
+        //
+        // Bir xil tovar bitta partiyada bir necha marta uchrasa (masalan
+        // ikki qatorda bir xil nom), miqdorlarni oldindan yig'amiz —
+        // aks holda CASE da faqat oxirgisi qolardi.
+        const qtyById = new Map();
+        for (const c of withQty) {
+          const id = Number(c.product.id);
+          qtyById.set(id, (qtyById.get(id) || 0) + Number(c.qty));
+        }
+        const ids  = [...qtyById.keys()];
+        const cases = [...qtyById.entries()]
+          .map(([id, q]) => `WHEN ${id} THEN \`qty\` + ${q}`)
           .join(' ');
         await sequelize.query(
-          `UPDATE \`product\` SET \`qty\` = CASE \`id\` ${cases} END
-            WHERE \`id\` IN (${ids.map(Number).join(',')})`,
+          `UPDATE \`product\` SET \`qty\` = CASE \`id\` ${cases} ELSE \`qty\` END
+            WHERE \`id\` IN (${ids.join(',')})`,
           { transaction: t }
         );
       }
     });
 
+    // Kassir nima bo'lganini bilishi kerak: nechtasi yangi, nechtasi
+    // mavjud tovarga qo'shildi
+    const yangilar = created.filter(c => !c.mavjud);
+    const qoshilgan = created.filter(c => c.mavjud);
+
     res.status(201).json({
       ok: true,
-      yaratildi: created.length,
+      yaratildi: yangilar.length,
+      qoshildi:  qoshilgan.length,
+      jami:      created.length,
       kirim_hujjati: purchaseId,
-      mahsulotlar: created.map(c => ({ id: c.product.id, name: c.product.name })),
+      mahsulotlar: created.map(c => ({
+        id: c.product.id, name: c.product.name, mavjud: !!c.mavjud,
+      })),
     });
   };
 

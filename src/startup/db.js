@@ -37,6 +37,10 @@ module.exports = async function(){
         ['bot_link',         'daily_hour',         'INT NOT NULL DEFAULT 21'],
         ['bot_link',         'chat_username',      'VARCHAR(100) DEFAULT NULL'],
         ['bot_link',         'created_by_name',    'VARCHAR(100) DEFAULT NULL'],
+        // Qisman qaytarish: shu satrdan qancha qaytarilgani
+        ['sale_item',        'returned_qty',       'DECIMAL(15,3) NOT NULL DEFAULT 0'],
+        // Sotuvdan jami qaytarilgan summa (chegirma hisobga olingan)
+        ['sale',             'returned_sum',       'DECIMAL(18,2) NOT NULL DEFAULT 0'],
     ];
 
     // supplier jadvalini yaratish (mavjud bo'lmasa)

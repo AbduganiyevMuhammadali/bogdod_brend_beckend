@@ -14,5 +14,7 @@ router.post('/complete',    auth(), perm('sales', 'qoshish'),    awaitHF(ctrl.co
 router.post('/pay-debt',    auth(), perm('payments', 'qoshish'), awaitHF(ctrl.payDebt))
 router.post('/cash-entry',  auth(), perm('payments', 'qoshish'), awaitHF(ctrl.cashEntry))
 router.post('/:id/cancel',  auth(), perm('returns', 'qoshish'),  awaitHF(ctrl.cancel))
+// Qisman qaytarish — tanlangan tovarlarni qaytarish
+router.post('/:id/return-items', auth(), perm('returns', 'qoshish'), awaitHF(ctrl.returnItems))
 
 module.exports = router

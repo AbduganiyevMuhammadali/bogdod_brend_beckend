@@ -11,6 +11,9 @@ SaleItemModel.init({
   barcode:          { type: DataTypes.STRING(100), allowNull: true },
   product_name:     { type: DataTypes.STRING(300), allowNull: false },
   qty:              { type: DataTypes.DECIMAL(10, 3), defaultValue: 0 },
+  // Shu satrdan qancha qaytarilgan. Qisman qaytarishda ishlatiladi:
+  // bir tovarni bir necha marta (qismlab) qaytarish mumkin.
+  returned_qty: { type: DataTypes.DECIMAL(15, 3), defaultValue: 0 },
   price:            { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
   cost_price:       { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
   total_sum:        { type: DataTypes.DECIMAL(18, 2), defaultValue: 0 },

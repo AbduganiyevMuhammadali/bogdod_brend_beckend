@@ -185,21 +185,57 @@ class BotController {
   /** GET /api/v1/bot/debtors — qarzdorlar ro'yxati (bot uchun qisqa) */
   debtors = async (req, res) => {
     const bugun = bugunKey()
+    // `?bugun=1` — faqat bugun to'lashi kerak bo'lganlar va kechikkanlar.
+    // Ertalabki eslatma shu ro'yxatni yuboradi.
+    const faqatBugun = req.query.bugun === '1' || req.query.bugun === 'true'
+
+    const shart = faqatBugun
+      ? `AND s.due_date IS NOT NULL AND s.due_date <= '${bugun}'`
+      : ''
+
     const [rows] = await sequelize.query(`
-      SELECT c.name, c.phone, SUM(s.debt_sum) qarz, MIN(s.due_date) muddat
+      SELECT c.name, c.phone,
+             SUM(s.debt_sum) qarz,
+             MIN(s.due_date)  muddat,
+             MIN(s.date)      birinchi_xarid,
+             MAX(s.date)      oxirgi_xarid,
+             COUNT(*)         hujjatlar
         FROM sale s JOIN client c ON c.id = s.client_id
-       WHERE s.debt_sum > 0 AND s.status <> 'cancelled'
+       WHERE s.debt_sum > 0 AND s.status <> 'cancelled' ${shart}
        GROUP BY s.client_id
        ORDER BY (MIN(s.due_date) IS NULL), MIN(s.due_date) ASC
-       LIMIT 30
+       LIMIT 40
     `).catch(() => [[]])
 
-    res.json((rows || []).map(r => ({
-      name: r.name, phone: r.phone,
-      qarz: Number(r.qarz) || 0,
-      muddat: r.muddat ? String(r.muddat).slice(0, 10) : null,
-      kechikkan: r.muddat ? String(r.muddat).slice(0, 10) < bugun : false,
-    })))
+    // MySQL DATETIME ni Date obyekt sifatida qaytaradi va `String()`
+    // uni "Mon Aug 10" ga aylantiradi — sanani ISO shaklga keltiramiz.
+    const isoSana = (v) => {
+      if (!v) return null
+      if (v instanceof Date) {
+        const y = v.getFullYear()
+        const m = String(v.getMonth() + 1).padStart(2, '0')
+        const d = String(v.getDate()).padStart(2, '0')
+        return `${y}-${m}-${d}`
+      }
+      return String(v).slice(0, 10)
+    }
+
+    res.json((rows || []).map(r => {
+      const muddat = isoSana(r.muddat)
+      const kechikkan = muddat ? muddat < bugun : false
+      return {
+        name: r.name, phone: r.phone,
+        qarz: Number(r.qarz) || 0,
+        muddat, kechikkan,
+        // Qachon qarzga olgani — undirishda suhbat uchun kerak
+        olingan: isoSana(r.oxirgi_xarid),
+        hujjatlar: Number(r.hujjatlar) || 0,
+        // Necha kun kechikkani
+        kunlar: kechikkan
+          ? Math.round((new Date(bugun) - new Date(muddat)) / 86400000)
+          : 0,
+      }
+    }))
   }
 
   /** GET /api/v1/bot/low-stock — kam qolgan tovarlar */

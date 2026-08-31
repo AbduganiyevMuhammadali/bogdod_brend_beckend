@@ -192,8 +192,23 @@ class SaleController {
     // Calculate totals
     const totalSum  = items.reduce((s, i) => s + Number(i.total_sum), 0)
     const discount  = Number(header.discount) || 0
-    const paidSum   = header.payment_type === 'Qarz' ? 0 : (totalSum - discount)
-    const debtSum   = header.payment_type === 'Qarz' ? (totalSum - discount) : 0
+    const netSum    = totalSum - discount
+
+    // ARALASH TO'LOV: mijoz savdoning bir qismini darhol to'lab,
+    // qolganini qarzga olishi mumkin. Frontend "Qarz" turini yuboradi
+    // va `paid_sum` da oldindan to'langan pulni beradi.
+    //
+    // `paid_sum` kelmasa — eski xatti-harakat: qarzga bo'lsa 0,
+    // aks holda to'liq summa.
+    let paidSum, debtSum
+    if (header.payment_type === 'Qarz') {
+      const oldindan = Math.max(0, Math.min(netSum, Number(header.paid_sum) || 0))
+      paidSum = oldindan
+      debtSum = +(netSum - oldindan).toFixed(2)
+    } else {
+      paidSum = netSum
+      debtSum = 0
+    }
     const toUSD     = v => rate > 0 ? +(v / rate).toFixed(4) : 0
 
     header.total_sum    = totalSum
@@ -209,6 +224,9 @@ class SaleController {
     // Qarz muddati — faqat qarzli sotuvda saqlanadi. Naqd sotuvga
     // muddat kelib qolsa (eski oynadan), uni tashlab yuboramiz.
     header.due_date = debtSum > 0 && header.due_date ? header.due_date : null
+
+    // Modelda yo'q maydonlar (faqat hisob uchun kelgan)
+    delete header.prepay_type
 
     const sale = await SaleModel.create(header)
 
@@ -338,10 +356,15 @@ class SaleController {
         date:           header.date,
         type:           'sale',
         amount:         paidSum,
+        // Aralash to'lovda tur "Qarz" bo'ladi, lekin oldindan to'langan
+        // pul aslida naqd/karta/o'tkazma orqali olinadi — kassa
+        // hisobotida to'g'ri ko'rinishi uchun o'sha usulni yozamiz.
         payment_type:   ['Naqd', 'Karta', "O'tkazma"].includes(header.payment_type)
-                          ? header.payment_type : 'Naqd',
+                          ? header.payment_type
+                          : (['Naqd', 'Karta', "O'tkazma"].includes(header.prepay_type)
+                              ? header.prepay_type : 'Naqd'),
         reference_id:   sale.id,
-        reference_type: 'sale',
+        reference_type: debtSum > 0 ? 'sale_prepay' : 'sale',
         client_id:      header.client_id ?? null,
         description:    `Sotuv #${header.doc_number}`,
         cashier_id:     header.cashier_id,
@@ -411,6 +434,181 @@ class SaleController {
 
     await sale.update({ status: 'cancelled' })
     res.json(sale)
+  }
+
+  /**
+   * POST /api/v1/sales/:id/return-items
+   * Tanlangan tovarlarni qisman qaytarish.
+   *
+   * Tana: { items: [{ sale_item_id, qty }], comment? }
+   *
+   * Butun hujjatni bekor qilishdan farqi: mijoz bitta tovarni qaytarsa,
+   * qolgan tovarlar sotuvda qoladi va hisobotlar buzilmaydi.
+   *
+   * Chegirma nisbatan taqsimlanadi: chekda 100,000 chegirma bo'lsa,
+   * qaytariladigan tovarga to'g'ri keladigan qismi ayriladi — mijozga
+   * haqiqatda to'lagan puli qaytadi.
+   */
+  returnItems = async (req, res) => {
+    const { items = [], comment } = req.body
+    if (!Array.isArray(items) || !items.length) {
+      throw new HttpException(400, 'Qaytariladigan tovar tanlanmagan')
+    }
+
+    const sale = await SaleModel.findOne({
+      where:   { id: req.params.id },
+      include: [{ model: SaleItemModel, as: 'items' }],
+    })
+    if (!sale) throw new HttpException(404, 'Sotuv topilmadi')
+    if (sale.status === 'cancelled') throw new HttpException(400, 'Sotuv bekor qilingan')
+
+    const byId = new Map(sale.items.map(i => [i.id, i]))
+
+    // Chegirma nisbati — sotuv paytidagi kabi
+    const totalSum = Number(sale.total_sum) || 0
+    const discount = Number(sale.discount)  || 0
+    const koef = totalSum > 0 ? Math.max(0, 1 - discount / totalSum) : 1
+
+    // ── Tekshiruv: kiritishdan oldin hammasi to'g'rimi ──────────────
+    const rejalar = []
+    for (const it of items) {
+      const satr = byId.get(Number(it.sale_item_id))
+      if (!satr) throw new HttpException(400, 'Sotuvda bunday tovar yo\'q')
+
+      const qty = Number(it.qty)
+      if (!(qty > 0)) throw new HttpException(400, `"${satr.product_name}" uchun miqdor noto'g'ri`)
+
+      const sotilgan   = Number(satr.qty) || 0
+      const qaytarilgan = Number(satr.returned_qty) || 0
+      const qolgan     = sotilgan - qaytarilgan
+      if (qty > qolgan) {
+        throw new HttpException(400,
+          `"${satr.product_name}": ${qolgan} dona qaytarish mumkin (${qty} so'ralgan)`)
+      }
+
+      // Chegirmadan keyingi haqiqiy summa
+      const summa = +(Number(satr.price) * qty * koef).toFixed(2)
+      rejalar.push({ satr, qty, summa })
+    }
+
+    const jamiSumma = rejalar.reduce((a, r) => a + r.summa, 0)
+    let jamiDona = 0
+
+    await sequelize.transaction(async (t) => {
+      for (const r of rejalar) {
+        jamiDona += r.qty
+
+        // 1) Omborga qaytaramiz
+        if (r.satr.product_id) {
+          const product = await ProductModel.findByPk(r.satr.product_id, { transaction: t })
+          if (product) {
+            await product.update(
+              { qty: Number(product.qty) + r.qty }, { transaction: t })
+          }
+        }
+
+        // 2) FIFO partiyalarini tiklaymiz — eng oxirgi yechilgandan
+        //    boshlab qaytaramiz (LIFO tartibida), shunda tannarx
+        //    hisobi buzilmaydi
+        const regs = await ProductRegisterModel.findAll({
+          where: { sale_id: sale.id, product_id: r.satr.product_id, status: 'active' },
+          order: [['id', 'DESC']],
+          transaction: t,
+        })
+        let qaytarish = r.qty
+        for (const reg of regs) {
+          if (qaytarish <= 0) break
+          const bor = Number(reg.qty) || 0
+          if (bor <= 0) continue
+          const olish = Math.min(bor, qaytarish)
+
+          if (reg.purchase_item_id) {
+            const batch = await PurchaseItemModel.findByPk(reg.purchase_item_id, { transaction: t })
+            if (batch) {
+              await batch.update({
+                sold_qty:  Math.max(0, Number(batch.sold_qty) - olish),
+                stock_qty: Number(batch.stock_qty) + olish,
+              }, { transaction: t })
+            }
+          }
+
+          // Register satrini kamaytiramiz (yoki to'liq bekor qilamiz)
+          const yangiQty = bor - olish
+          const ulush = bor > 0 ? (yangiQty / bor) : 0
+          await reg.update({
+            qty: yangiQty,
+            total_sum: +(Number(reg.total_sum) * ulush).toFixed(2),
+            ...(yangiQty === 0 ? { status: 'reversed' } : {}),
+          }, { transaction: t })
+
+          qaytarish -= olish
+        }
+
+        // 3) Satrda qaytarilgan miqdorni belgilaymiz
+        await r.satr.update(
+          { returned_qty: (Number(r.satr.returned_qty) || 0) + r.qty },
+          { transaction: t })
+      }
+
+      // 4) Pul: qarzga sotilgan bo'lsa qarzdan ayiramiz, aks holda kassadan
+      const qarzga = Number(sale.debt_sum) > 0
+      if (qarzga && sale.client_id) {
+        const client = await ClientModel.findByPk(sale.client_id, { transaction: t })
+        if (client) {
+          // Qarz kamayadi — balans manfiy bo'lgani uchun ustiga qo'shamiz
+          const yangiBalans = Number(client.balance) + jamiSumma
+          await client.update({ balance: yangiBalans }, { transaction: t })
+        }
+        await sale.update({
+          debt_sum: Math.max(0, Number(sale.debt_sum) - jamiSumma),
+        }, { transaction: t })
+      } else {
+        // Naqd qaytarish — kassa harakati sifatida yoziladi
+        await CashTransactionModel.create({
+          date: new Date(),
+          type: 'refund',
+          amount: jamiSumma,
+          payment_type: ['Naqd', 'Karta', "O'tkazma"].includes(sale.payment_type)
+            ? sale.payment_type : 'Naqd',
+          reference_id: sale.id,
+          reference_type: 'sale_return',
+          description: comment || `Qaytarish: sotuv #${sale.doc_number}`,
+          cashier_id: req.currentUser?.id ?? null,
+        }, { transaction: t })
+      }
+
+      // 5) Sotuvda qaytarilgan summani yig'ib boramiz
+      const yangiReturned = (Number(sale.returned_sum) || 0) + jamiSumma
+      const patch = { returned_sum: yangiReturned }
+
+      // Hamma tovar qaytarilgan bo'lsa — sotuvni bekor deb belgilaymiz
+      const qoldi = sale.items.reduce((a, i) => {
+        const q = Number(i.qty) || 0
+        const r = rejalar.find(x => x.satr.id === i.id)
+        const qaytdi = (Number(i.returned_qty) || 0) + (r ? r.qty : 0)
+        return a + (q - qaytdi)
+      }, 0)
+      if (qoldi <= 0) {
+        patch.status = 'cancelled'
+        await KassaRegisterModel.update(
+          { status: 'cancelled' }, { where: { sale_id: sale.id }, transaction: t })
+      }
+
+      await sale.update(patch, { transaction: t })
+    })
+
+    const yangilangan = await SaleModel.findOne({
+      where: { id: sale.id },
+      include: [{ model: SaleItemModel, as: 'items' }],
+    })
+
+    res.json({
+      ok: true,
+      qaytarildi: jamiDona,
+      summa: jamiSumma,
+      toliq_bekor: yangilangan.status === 'cancelled',
+      sale: yangilangan,
+    })
   }
 
   // ── Cash report ───────────────────────────────────────────────
