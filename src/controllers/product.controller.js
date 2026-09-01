@@ -1,6 +1,7 @@
 const ProductModel = require('../models/product.model');
 const HttpException = require('../utils/HttpException.utils');
 const { Op } = require('sequelize');
+const sequelize = require('../db/db-sequelize');
 const BaseController = require('./BaseController');
 const { barcodeVariants } = require('../utils/barcode.utils');
 

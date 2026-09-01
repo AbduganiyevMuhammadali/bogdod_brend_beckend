@@ -1,4 +1,5 @@
 const { Op } = require('sequelize')
+const sequelize             = require('../db/db-sequelize')
 const SaleModel             = require('../models/sale.model')
 const SaleItemModel         = require('../models/sale_item.model')
 const ProductModel          = require('../models/product.model')
