@@ -12,6 +12,9 @@ router.get('/:id',     auth(), awaitHF(ctrl.getById));
 // Ombor tahlili — "nega tovar topilmadi?" savoliga javob. Faqat o'qiydi.
 router.get('/:id/tahlil', auth(), awaitHF(ctrl.tahlil));
 
+// Omborni tuzatish — manfiy qoldiq va partiya nomuvofiqligi
+router.post('/ombor-tuzat', auth(), perm('products', 'tahrir'), awaitHF(ctrl.omborTuzat));
+
 router.post('/',       auth(), perm('products', 'qoshish'), awaitHF(ctrl.create));
 router.post('/:id/scan',   auth(), perm('products', 'tahrir'), awaitHF(ctrl.scan));
 router.post('/:id/finish', auth(), perm('products', 'tahrir'), awaitHF(ctrl.finish));

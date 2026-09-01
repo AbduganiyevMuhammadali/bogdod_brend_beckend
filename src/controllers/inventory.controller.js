@@ -176,6 +176,56 @@ class InventoryController extends BaseController {
         SUM(CASE WHEN is_folder = 0 AND active = 1 AND qty > 0 THEN qty ELSE 0 END) jami_dona
       FROM \`product\``);
 
+    // ── 1b. MANFIY QOLDIQLAR ─────────────────────────────────────
+    //
+    // Manfiy qoldiq — omborda yo'q tovar sotilgani (oversell). Sotuvda
+    // qoldiq tekshirilmasa shunday bo'ladi. FIFO hisobini buzadi va
+    // sanoqda ham chalkashlik keltiradi.
+    const manfiyRoyxat = await q(`
+      SELECT id, name nomi, qty qoldiq, barcodes
+      FROM \`product\`
+      WHERE is_folder = 0 AND active = 1 AND qty < 0
+      ORDER BY qty ASC LIMIT 200`);
+
+    // ── 1c. PARTIYA NOMUVOFIQLIGI ────────────────────────────────
+    //
+    // `product.qty` va FIFO partiyalari yig'indisi (`purchase_item
+    // .stock_qty`) bir xil bo'lishi kerak. Farq bo'lsa — tannarx va
+    // foyda hisobi noto'g'ri chiqadi.
+    const nomuvofiq = await q(`
+      SELECT p.id, p.name nomi, p.qty qoldiq,
+             COALESCE(b.jami, 0) partiya,
+             p.qty - COALESCE(b.jami, 0) farq
+      FROM \`product\` p
+      LEFT JOIN (
+        SELECT product_id, SUM(stock_qty) jami
+        FROM \`purchase_item\` GROUP BY product_id
+      ) b ON b.product_id = p.id
+      WHERE p.is_folder = 0 AND p.active = 1
+        AND p.qty <> COALESCE(b.jami, 0)
+      ORDER BY ABS(p.qty - COALESCE(b.jami, 0)) DESC LIMIT 200`);
+
+    const [nomuvofiqJami] = await q(`
+      SELECT COUNT(*) n FROM \`product\` p
+      LEFT JOIN (
+        SELECT product_id, SUM(stock_qty) jami
+        FROM \`purchase_item\` GROUP BY product_id
+      ) b ON b.product_id = p.id
+      WHERE p.is_folder = 0 AND p.active = 1
+        AND p.qty <> COALESCE(b.jami, 0)`);
+
+    // ── 1d. BIR NECHTA DONA BO'LGAN TOVARLAR ─────────────────────
+    //
+    // "Necha xil, necha dona" — do'kon egasiga eng kerakli raqam.
+    const [donalar] = await q(`
+      SELECT
+        SUM(CASE WHEN qty = 1 THEN 1 ELSE 0 END) bitta,
+        SUM(CASE WHEN qty > 1 THEN 1 ELSE 0 END) kop,
+        SUM(CASE WHEN qty > 1 THEN qty ELSE 0 END) kop_dona,
+        MAX(qty) eng_kop
+      FROM \`product\`
+      WHERE is_folder = 0 AND active = 1 AND qty > 0`);
+
     // ── 2. Sanoq satrlari ────────────────────────────────────────
     const [sanoq] = await q(`
       SELECT COUNT(*) satr,
@@ -258,7 +308,16 @@ class InventoryController extends BaseController {
         qoldigi_nol: Number(ombor.qoldigi_nol) || 0,
         manfiy:      Number(ombor.manfiy)      || 0,
         jami_dona:   Number(ombor.jami_dona)   || 0,
+        // Necha xil tovar bir dona, nechtasi ko'p dona
+        bitta_dona:  Number(donalar.bitta)     || 0,
+        kop_dona:    Number(donalar.kop)       || 0,
+        kop_dona_soni: Number(donalar.kop_dona) || 0,
+        eng_kop:     Number(donalar.eng_kop)   || 0,
+        // Partiya nomuvofiqligi — FIFO buzilgan tovarlar
+        nomuvofiq:   Number(nomuvofiqJami.n)   || 0,
       },
+      manfiy_royxat:    manfiyRoyxat,
+      nomuvofiq_royxat: nomuvofiq,
       sanoq: {
         satr:           Number(sanoq.satr)           || 0,
         topildi:        Number(sanoq.topildi)        || 0,
@@ -274,6 +333,128 @@ class InventoryController extends BaseController {
       },
       kodsiz_royxat:   kodsizRoyxat,
       dublikat_royxat: dublikatRoyxat,
+    })
+  }
+
+  /**
+   * POST /api/v1/inventories/ombor-tuzat
+   *
+   * OMBORNI TUZATISH — ikki muammoni hal qiladi:
+   *
+   *   1) MANFIY QOLDIQ. Omborda yo'q tovar sotilganda paydo bo'ladi.
+   *      Manfiy qoldiq real emas — hech qachon "-3 dona" bo'lmaydi.
+   *      0 ga ko'tariladi.
+   *
+   *   2) PARTIYA NOMUVOFIQLIGI. `product.qty` va FIFO partiyalari
+   *      yig'indisi farq qilsa, tannarx va foyda noto'g'ri chiqadi.
+   *      Partiyalar mahsulot qoldig'iga tenglashtiriladi.
+   *
+   * Tana: { manfiy?: true, partiya?: true }  — qaysi birini tuzatish
+   *
+   * Tuzatishdan oldin zaxira nusxa olinadi.
+   */
+  omborTuzat = async (req, res) => {
+    const { manfiy = true, partiya = false } = req.body || {};
+
+    // Tuzatishdan oldin qaytish nuqtasi
+    let snapshotId = null;
+    try {
+      snapshotId = await stockGuard.takeSnapshot({
+        label:  'Omborni tuzatishdan oldin',
+        reason: `manfiy: ${manfiy}, partiya: ${partiya}`,
+        user:   req.currentUser,
+      });
+    } catch (e) {
+      console.log('Snapshot olinmadi:', e.message);
+    }
+
+    let manfiyTuzatildi = 0, partiyaTuzatildi = 0;
+    const tafsilot = [];
+
+    await sequelize.transaction(async (t) => {
+      // ── 1) Manfiy qoldiqlar ──────────────────────────────────────
+      if (manfiy) {
+        const manfiylar = await ProductModel.findAll({
+          where: { active: true, is_folder: false, qty: { [Op.lt]: 0 } },
+          transaction: t,
+        });
+
+        for (const p of manfiylar) {
+          tafsilot.push({ nomi: p.name, edi: Number(p.qty), boldi: 0 });
+        }
+
+        if (manfiylar.length) {
+          await ProductModel.update(
+            { qty: 0 },
+            { where: { id: { [Op.in]: manfiylar.map(p => p.id) } }, transaction: t }
+          );
+          manfiyTuzatildi = manfiylar.length;
+        }
+      }
+
+      // ── 2) Partiya nomuvofiqligi ─────────────────────────────────
+      //
+      // Partiyalar yig'indisini mahsulot qoldig'iga tenglashtiramiz.
+      // Mahsulot qoldig'i asosiy manba deb olinadi, chunki sanoq ham
+      // aynan shuni tekshiradi.
+      if (partiya) {
+        const rows = await sequelize.query(`
+          SELECT p.id, p.qty, COALESCE(b.jami, 0) partiya
+          FROM \`product\` p
+          LEFT JOIN (
+            SELECT product_id, SUM(stock_qty) jami
+            FROM \`purchase_item\` GROUP BY product_id
+          ) b ON b.product_id = p.id
+          WHERE p.is_folder = 0 AND p.active = 1
+            AND p.qty <> COALESCE(b.jami, 0) AND p.qty >= 0`,
+          { type: sequelize.QueryTypes.SELECT, transaction: t });
+
+        for (const r of rows) {
+          const kerak = Number(r.qty) || 0;
+          const bor   = Number(r.partiya) || 0;
+
+          const batches = await PurchaseItemModel.findAll({
+            where: { product_id: r.id },
+            order: [['id', 'ASC']],
+            transaction: t,
+          });
+
+          if (bor > kerak) {
+            // Ortiqchani eng eski partiyalardan yechamiz
+            let ol = bor - kerak;
+            for (const b of batches) {
+              if (ol <= 0) break;
+              const have = Number(b.stock_qty) || 0;
+              if (have <= 0) continue;
+              const take = Math.min(have, ol);
+              await b.update({ stock_qty: have - take }, { transaction: t });
+              ol -= take;
+            }
+            partiyaTuzatildi++;
+          } else if (bor < kerak && batches.length) {
+            // Yetishmaganini eng yangi partiyaga qo'shamiz —
+            // tannarx so'nggi kelgan narxga yaqin bo'ladi
+            const last = batches[batches.length - 1];
+            await last.update(
+              { stock_qty: (Number(last.stock_qty) || 0) + (kerak - bor) },
+              { transaction: t }
+            );
+            partiyaTuzatildi++;
+          }
+          // Partiya umuman yo'q bo'lsa tegmaymiz — tannarx noma'lum,
+          // uni kirim hujjati bilan kiritish kerak
+        }
+      }
+    });
+
+    stockGuard.pruneSnapshots(30).catch(() => {});
+
+    res.json({
+      ok: true,
+      manfiy_tuzatildi:  manfiyTuzatildi,
+      partiya_tuzatildi: partiyaTuzatildi,
+      snapshot_id: snapshotId,
+      tafsilot: tafsilot.slice(0, 50),
     })
   }
 

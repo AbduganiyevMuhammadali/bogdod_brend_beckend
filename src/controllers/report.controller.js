@@ -118,6 +118,206 @@ class ReportController {
   }
 
   // ── Product sales report ──────────────────────────────────────
+  /**
+   * GET /api/v1/reports/ombor
+   *
+   * OMBOR QOLDIG'I — "qaysi tovar bor va nechtasi bor".
+   *
+   * Har tovar bo'yicha: qoldiq, tannarx, sotuv narxi, ombordagi
+   * qiymati va kutilayotgan foyda. Qo'shimcha — oxirgi 30 kunda
+   * qancha sotilgani (sotuv tezligi) va necha kunga yetishi.
+   *
+   * Parametrlar:
+   *   search    — nom yoki shtrix-kod
+   *   category  — kategoriya
+   *   holat     — 'bor' | 'tugagan' | 'kam' | 'manfiy' | 'all'
+   *   sort      — 'nom' | 'qoldiq' | 'qiymat' | 'sotuv'
+   *   page, limit
+   */
+  getOmborReport = async (req, res) => {
+    const {
+      search, category, holat = 'bor', sort = 'nom',
+      page = 1, limit = 100,
+    } = req.query
+
+    const where = { is_folder: false, active: true }
+
+    if (holat === 'bor')      where.qty = { [Op.gt]: 0 }
+    else if (holat === 'tugagan') where.qty = { [Op.lte]: 0 }
+    else if (holat === 'manfiy')  where.qty = { [Op.lt]: 0 }
+    // 'kam' quyida literal bilan (min_qty bilan solishtirish)
+    // 'all' — filtr yo'q
+
+    if (category && category !== 'all') where.category = category
+
+    if (search) {
+      const q = String(search).trim()
+      where[Op.or] = [
+        { name:     { [Op.like]: `%${q}%` } },
+        { code:     { [Op.like]: `%${q}%` } },
+        { barcodes: { [Op.like]: `%${q}%` } },
+      ]
+    }
+
+    if (holat === 'kam') {
+      where[Op.and] = [
+        literal('`ProductModel`.`qty` > 0'),
+        literal('`ProductModel`.`qty` <= `ProductModel`.`min_qty`'),
+      ]
+    }
+
+    // ── Umumiy statistika (filtrga bog'liq emas — butun ombor) ────
+    const [umumiy] = await sequelize.query(`
+      SELECT
+        COUNT(*) xil,
+        COALESCE(SUM(CASE WHEN qty > 0 THEN qty ELSE 0 END), 0) dona,
+        COALESCE(SUM(CASE WHEN qty > 0 THEN 1 ELSE 0 END), 0) bor,
+        COALESCE(SUM(CASE WHEN qty <= 0 THEN 1 ELSE 0 END), 0) tugagan,
+        COALESCE(SUM(CASE WHEN qty > 0 AND qty <= min_qty THEN 1 ELSE 0 END), 0) kam,
+        COALESCE(SUM(CASE WHEN qty < 0 THEN 1 ELSE 0 END), 0) manfiy
+      FROM \`product\`
+      WHERE is_folder = 0 AND active = 1`,
+      { type: sequelize.QueryTypes.SELECT })
+
+    // Ombor qiymati — FIFO partiyalari bo'yicha (haqiqiy tannarx).
+    // `purchase_item.stock_qty` × `cost_price` — bu omborda turgan
+    // pulning aniq miqdori.
+    const [qiymat] = await sequelize.query(`
+      SELECT
+        COALESCE(SUM(pi.stock_qty * pi.cost_price), 0) tannarx_qiymati,
+        COALESCE(SUM(pi.stock_qty), 0) partiya_dona
+      FROM \`purchase_item\` pi
+      JOIN \`product\` p ON p.id = pi.product_id
+      WHERE pi.stock_qty > 0 AND p.is_folder = 0 AND p.active = 1`,
+      { type: sequelize.QueryTypes.SELECT })
+
+    // Sotuv narxidagi qiymat — sotilsa qancha pul tushishi
+    const [sotuvQiymat] = await sequelize.query(`
+      SELECT COALESCE(SUM(qty * retail_price), 0) sotuv_qiymati
+      FROM \`product\`
+      WHERE is_folder = 0 AND active = 1 AND qty > 0`,
+      { type: sequelize.QueryTypes.SELECT })
+
+    // ── Ro'yxat ──────────────────────────────────────────────────
+    const offset = (Number(page) - 1) * Number(limit)
+
+    const { count, rows } = await ProductModel.findAndCountAll({
+      where,
+      attributes: [
+        'id', 'code', 'name', 'category', 'qty', 'min_qty', 'unit',
+        'retail_price', 'wholesale_price', 'barcodes',
+      ],
+      order: sort === 'qoldiq'  ? [['qty', 'DESC']]
+           : sort === 'qiymat'  ? [[literal('`qty` * `retail_price`'), 'DESC']]
+           : [['name', 'ASC']],
+      limit:  Number(limit),
+      offset,
+    })
+
+    const ids = rows.map(p => p.id)
+
+    // Tannarx — FIFO partiyalaridan (o'rtacha vaznli)
+    let tannarxMap = new Map()
+    if (ids.length) {
+      const t = await sequelize.query(`
+        SELECT product_id,
+               SUM(stock_qty * cost_price) / NULLIF(SUM(stock_qty), 0) tannarx,
+               SUM(stock_qty) partiya_qoldiq
+        FROM \`purchase_item\`
+        WHERE product_id IN (:ids) AND stock_qty > 0
+        GROUP BY product_id`,
+        { replacements: { ids }, type: sequelize.QueryTypes.SELECT })
+      tannarxMap = new Map(t.map(r => [r.product_id, r]))
+    }
+
+    // Oxirgi 30 kunda sotilgani — sotuv tezligi.
+    // Shundan "necha kunga yetadi" hisoblanadi: sekin sotiladigan
+    // tovarga pul bog'lanib qolgani ko'rinadi.
+    let sotuvMap = new Map()
+    if (ids.length) {
+      const chegara = new Date()
+      chegara.setDate(chegara.getDate() - 30)
+      const sv = await sequelize.query(`
+        SELECT si.product_id, SUM(si.qty) sotildi, COUNT(DISTINCT s.id) marta
+        FROM \`sale_item\` si
+        JOIN \`sale\` s ON s.id = si.sale_id
+          AND (s.status IS NULL OR s.status <> 'cancelled')
+          AND s.date >= :chegara
+        WHERE si.product_id IN (:ids)
+        GROUP BY si.product_id`,
+        { replacements: { ids, chegara }, type: sequelize.QueryTypes.SELECT })
+      sotuvMap = new Map(sv.map(r => [r.product_id, r]))
+    }
+
+    const data = rows.map(p => {
+      const qty     = Number(p.qty) || 0
+      const t       = tannarxMap.get(p.id)
+      const tannarx = Number(t?.tannarx) || 0
+      const narx    = Number(p.retail_price) || 0
+      const sv      = sotuvMap.get(p.id)
+      const sotildi = Number(sv?.sotildi) || 0
+
+      // Kunlik o'rtacha sotuv → necha kunga yetadi
+      const kunlik = sotildi / 30
+      const yetadi = kunlik > 0 ? Math.round(qty / kunlik) : null
+
+      let barcode = null
+      try { barcode = (JSON.parse(p.barcodes) || [])[0] || null } catch { /* buzuq */ }
+
+      return {
+        id:        p.id,
+        code:      p.code,
+        nomi:      p.name,
+        kategoriya: p.category,
+        barcode,
+        birlik:    p.unit || 'Dona',
+        qoldiq:    qty,
+        min_qty:   Number(p.min_qty) || 0,
+        tannarx,
+        narx,
+        // Ombordagi qiymati — tannarx va sotuv narxida
+        tannarx_qiymati: +(tannarx * qty).toFixed(2),
+        sotuv_qiymati:   +(narx * qty).toFixed(2),
+        // Sotilsa qancha foyda kutiladi
+        kutilgan_foyda:  +((narx - tannarx) * qty).toFixed(2),
+        // Oxirgi 30 kun
+        sotildi_30k: sotildi,
+        marta_30k:   Number(sv?.marta) || 0,
+        yetadi_kun:  yetadi,
+        // Partiya nomuvofiqligi — FIFO buzilgan bo'lsa ko'rinadi
+        partiya_qoldiq: t ? Number(t.partiya_qoldiq) : 0,
+        kam: qty > 0 && qty <= (Number(p.min_qty) || 0),
+      }
+    })
+
+    // Kategoriyalar ro'yxati — filtr uchun
+    const kategoriyalar = await sequelize.query(`
+      SELECT category nomi, COUNT(*) xil, COALESCE(SUM(qty), 0) dona
+      FROM \`product\`
+      WHERE is_folder = 0 AND active = 1 AND qty > 0
+        AND category IS NOT NULL AND category <> ''
+      GROUP BY category ORDER BY dona DESC`,
+      { type: sequelize.QueryTypes.SELECT })
+
+    res.json({
+      total: count,
+      page:  Number(page),
+      has_more: offset + rows.length < count,
+      umumiy: {
+        xil:     Number(umumiy.xil)     || 0,
+        dona:    Number(umumiy.dona)    || 0,
+        bor:     Number(umumiy.bor)     || 0,
+        tugagan: Number(umumiy.tugagan) || 0,
+        kam:     Number(umumiy.kam)     || 0,
+        manfiy:  Number(umumiy.manfiy)  || 0,
+        tannarx_qiymati: Number(qiymat.tannarx_qiymati) || 0,
+        sotuv_qiymati:   Number(sotuvQiymat.sotuv_qiymati) || 0,
+      },
+      kategoriyalar,
+      data,
+    })
+  }
+
   getProductSales = async (req, res) => {
     const { date_from, date_to } = req.query
     const where = { status: 'active' }

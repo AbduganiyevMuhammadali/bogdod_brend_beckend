@@ -7,6 +7,8 @@ const awaitHF = require('../middleware/awaitHandlerFactory.middleware')
 router.get('/overview',         auth(), awaitHF(ctrl.getOverview))
 router.get('/today',            auth(), awaitHF(ctrl.getTodaySales))
 router.get('/products',         auth(), awaitHF(ctrl.getProductSales))
+// Ombor qoldig'i — qaysi tovar bor va nechtasi bor
+router.get('/ombor',            auth(), awaitHF(ctrl.getOmborReport))
 router.get('/clients',          auth(), awaitHF(ctrl.getClientReport))
 router.get('/cashiers',         auth(), awaitHF(ctrl.getCashierReport))
 router.get('/cash-register',    auth(), awaitHF(ctrl.getCashRegister))

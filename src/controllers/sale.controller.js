@@ -227,6 +227,7 @@ class SaleController {
 
     // Modelda yo'q maydonlar (faqat hisob uchun kelgan)
     delete header.prepay_type
+    delete header.allow_negative
 
     const sale = await SaleModel.create(header)
 
@@ -240,6 +241,53 @@ class SaleController {
     // hisobotida haqiqiydan katta foyda ko'rinardi (chegirma 99% ga
     // yetganda farq juda katta bo'lardi).
     const discountRatio = totalSum > 0 ? Math.min(discount / totalSum, 1) : 0
+
+    // ── QOLDIQ TEKSHIRUVI ────────────────────────────────────────
+    //
+    // Omborda yo'q tovarni sotish qoldiqni MANFIYGA tushiradi. Manfiy
+    // qoldiq real emas ("-3 dona" bo'lmaydi) va FIFO tannarx hisobini
+    // buzadi — keyin foyda hisoboti noto'g'ri chiqadi.
+    //
+    // Shuning uchun yetmasa to'xtatamiz. Kassir ataylab sotmoqchi
+    // bo'lsa (masalan tovar bor, lekin bazaga kirim qilinmagan)
+    // `allow_negative: true` yuboradi va o'zi javobgar bo'ladi.
+    if (header.allow_negative !== true) {
+      const idlar = [...new Set(items.map(i => i.product_id).filter(Boolean))];
+      if (idlar.length) {
+        const mavjud = await ProductModel.findAll({
+          where: { id: { [Op.in]: idlar } },
+          attributes: ['id', 'name', 'qty'],
+        });
+        const qoldiq = new Map(mavjud.map(p => [p.id, Number(p.qty) || 0]));
+
+        // Bir tovar savatda bir necha satrda bo'lishi mumkin — yig'amiz
+        const talab = new Map();
+        for (const i of items) {
+          if (!i.product_id) continue;
+          talab.set(i.product_id, (talab.get(i.product_id) || 0) + Number(i.qty));
+        }
+
+        const yetmaydi = [];
+        for (const [id, kerak] of talab) {
+          const bor = qoldiq.get(id);
+          if (bor === undefined) continue;
+          if (kerak > bor) {
+            const p = mavjud.find(x => x.id === id);
+            yetmaydi.push({ nomi: p?.name || `#${id}`, bor, kerak });
+          }
+        }
+
+        if (yetmaydi.length) {
+          const matn = yetmaydi
+            .map(y => `"${y.nomi}": omborda ${y.bor} ta, so'ralgan ${y.kerak} ta`)
+            .join('; ');
+          throw new HttpException(409, `Qoldiq yetarli emas — ${matn}`, {
+            code: 'QOLDIQ_YETMAYDI',
+            tovarlar: yetmaydi,
+          });
+        }
+      }
+    }
 
     // Process items: FIFO deduction + SaleItem creation
     // fifoMap stores deductions per SaleItem id for ProductRegister
