@@ -140,6 +140,143 @@ class InventoryController extends BaseController {
     res.json(doc);
   };
 
+  /**
+   * GET /api/v1/inventories/:id/tahlil
+   *
+   * OMBOR TAHLILI — "nega bunchalik tovar topilmadi?" degan savolga javob.
+   *
+   * Sanoqda "topilmadi" bo'lgan tovarlarni SABABLARGA ajratadi:
+   *   • shtrix-kodi yo'q      — skanerlab bo'lmaydi, hech qachon topilmaydi
+   *   • dublikat kodli        — skaner faqat birinchisini topadi
+   *   • sanoq davomida sotilgan — javonda yo'q edi, normal holat
+   *   • qolgani               — shunchaki skanerlanmagan
+   *
+   * Bazaga hech narsa yozmaydi.
+   */
+  tahlil = async (req, res) => {
+    const doc = await InventoryModel.findByPk(req.params.id);
+    if (!doc) throw new HttpException(404, 'Hujjat topilmadi');
+
+    const q = (sql, repl = []) =>
+      sequelize.query(sql, { replacements: repl, type: sequelize.QueryTypes.SELECT });
+
+    // ── 1. Ombor holati ──────────────────────────────────────────
+    //
+    // Sanoq varaqasi FAQAT `active=1 AND is_folder=0 AND qty>0` ga
+    // ochiladi — shuning uchun Mahsulotlar bo'limidagi umumiy son
+    // bilan farq qilishi normal. Buni foydalanuvchiga ko'rsatamiz.
+    const [ombor] = await q(`
+      SELECT
+        COUNT(*) jami,
+        SUM(CASE WHEN is_folder = 1 THEN 1 ELSE 0 END) papka,
+        SUM(CASE WHEN is_folder = 0 AND active = 0 THEN 1 ELSE 0 END) nofaol,
+        SUM(CASE WHEN is_folder = 0 AND active = 1 AND qty > 0 THEN 1 ELSE 0 END) qoldigi_bor,
+        SUM(CASE WHEN is_folder = 0 AND active = 1 AND qty = 0 THEN 1 ELSE 0 END) qoldigi_nol,
+        SUM(CASE WHEN is_folder = 0 AND active = 1 AND qty < 0 THEN 1 ELSE 0 END) manfiy,
+        SUM(CASE WHEN is_folder = 0 AND active = 1 AND qty > 0 THEN qty ELSE 0 END) jami_dona
+      FROM \`product\``);
+
+    // ── 2. Sanoq satrlari ────────────────────────────────────────
+    const [sanoq] = await q(`
+      SELECT COUNT(*) satr,
+        SUM(CASE WHEN counted_qty > 0 THEN 1 ELSE 0 END) topildi,
+        SUM(CASE WHEN counted_qty = 0 AND expected_qty > 0 THEN 1 ELSE 0 END) topilmadi,
+        SUM(CASE WHEN expected_qty = 0 AND counted_qty > 0 THEN 1 ELSE 0 END) ortiqcha,
+        SUM(CASE WHEN counted_qty = 0 AND expected_qty > 0 THEN expected_qty ELSE 0 END) topilmadi_dona
+      FROM \`inventory_item\` WHERE inventory_id = ?`, [doc.id]);
+
+    // ── 3. Sabablar ──────────────────────────────────────────────
+    const YOQ = "(p.barcodes IS NULL OR p.barcodes = '' OR p.barcodes = '[]')";
+    const TOPILMADI = "i.inventory_id = ? AND i.counted_qty = 0 AND i.expected_qty > 0";
+
+    const [kodsiz] = await q(`
+      SELECT COUNT(*) n, COALESCE(SUM(i.expected_qty), 0) dona
+      FROM \`inventory_item\` i JOIN \`product\` p ON p.id = i.product_id
+      WHERE ${TOPILMADI} AND ${YOQ}`, [doc.id]);
+
+    // Dublikat kodli tovarlar — skaner faqat birinchisini topadi,
+    // qolganlari hech qachon skanerlanmaydi
+    const [dublikat] = await q(`
+      SELECT COUNT(*) n, COALESCE(SUM(i.expected_qty), 0) dona
+      FROM \`inventory_item\` i JOIN \`product\` p ON p.id = i.product_id
+      WHERE ${TOPILMADI} AND p.barcodes IN (
+        SELECT barcodes FROM (
+          SELECT barcodes FROM \`product\`
+          WHERE is_folder = 0 AND active = 1
+            AND barcodes IS NOT NULL AND barcodes <> '' AND barcodes <> '[]'
+          GROUP BY barcodes HAVING COUNT(*) > 1
+        ) x
+      )`, [doc.id]);
+
+    // Sanoq ochilgandan keyin sotilganlar — javonda yo'q edi
+    let sotilgan = { n: 0, dona: 0 };
+    const boshlanish = doc.created_at || doc.createdAt;
+    if (boshlanish) {
+      const [r] = await q(`
+        SELECT COUNT(DISTINCT i.product_id) n, COALESCE(SUM(si.qty), 0) dona
+        FROM \`inventory_item\` i
+        JOIN \`sale_item\` si ON si.product_id = i.product_id
+        JOIN \`sale\` s ON s.id = si.sale_id
+          AND (s.status IS NULL OR s.status <> 'cancelled') AND s.date >= ?
+        WHERE ${TOPILMADI}`, [boshlanish, doc.id]);
+      sotilgan = r;
+    }
+
+    // ── 4. Ro'yxatlar — foydalanuvchi ko'rib chiqishi uchun ───────
+    const kodsizRoyxat = await q(`
+      SELECT i.product_name nomi, i.expected_qty qoldiq, p.id product_id
+      FROM \`inventory_item\` i JOIN \`product\` p ON p.id = i.product_id
+      WHERE ${TOPILMADI} AND ${YOQ}
+      ORDER BY i.expected_qty DESC, i.product_name ASC LIMIT 300`, [doc.id]);
+
+    const dublikatRoyxat = await q(`
+      SELECT p.barcodes kod, COUNT(*) soni, SUM(p.qty) dona,
+             GROUP_CONCAT(p.name ORDER BY p.id SEPARATOR ' • ') nomlar
+      FROM \`product\` p
+      WHERE p.is_folder = 0 AND p.active = 1
+        AND p.barcodes IS NOT NULL AND p.barcodes <> '' AND p.barcodes <> '[]'
+      GROUP BY p.barcodes HAVING soni > 1
+      ORDER BY soni DESC, dona DESC LIMIT 100`);
+
+    // Skanerlanmaganlar — texnik sabab yo'q, shunchaki sanalmagan
+    const skanerlanmagan = Math.max(0,
+      Number(sanoq.topilmadi) - Number(kodsiz.n) - Number(dublikat.n));
+
+    res.json({
+      hujjat: {
+        id: doc.id,
+        doc_number: doc.doc_number,
+        status: doc.status,
+        ochilgan: boshlanish,
+        yakunlangan: doc.finished_at,
+      },
+      ombor: {
+        jami:        Number(ombor.jami)        || 0,
+        papka:       Number(ombor.papka)       || 0,
+        nofaol:      Number(ombor.nofaol)      || 0,
+        qoldigi_bor: Number(ombor.qoldigi_bor) || 0,
+        qoldigi_nol: Number(ombor.qoldigi_nol) || 0,
+        manfiy:      Number(ombor.manfiy)      || 0,
+        jami_dona:   Number(ombor.jami_dona)   || 0,
+      },
+      sanoq: {
+        satr:           Number(sanoq.satr)           || 0,
+        topildi:        Number(sanoq.topildi)        || 0,
+        topilmadi:      Number(sanoq.topilmadi)      || 0,
+        ortiqcha:       Number(sanoq.ortiqcha)       || 0,
+        topilmadi_dona: Number(sanoq.topilmadi_dona) || 0,
+      },
+      sabablar: {
+        kodsiz:         { n: Number(kodsiz.n)   || 0, dona: Number(kodsiz.dona)   || 0 },
+        dublikat:       { n: Number(dublikat.n) || 0, dona: Number(dublikat.dona) || 0 },
+        sotilgan:       { n: Number(sotilgan.n) || 0, dona: Number(sotilgan.dona) || 0 },
+        skanerlanmagan: { n: skanerlanmagan },
+      },
+      kodsiz_royxat:   kodsizRoyxat,
+      dublikat_royxat: dublikatRoyxat,
+    })
+  }
+
   // Yangi sanoq varaqasi: ombordagi barcha faol mahsulot uchun satr ochiladi.
   // Shunda "topilmadi" ro'yxati boshidanoq to'liq bo'ladi va skanerlash
   // uni bo'shatib boradi — rasmda ko'rsatilgan jarayon shunday.

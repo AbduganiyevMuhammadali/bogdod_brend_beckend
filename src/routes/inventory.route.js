@@ -9,6 +9,8 @@ const perm    = require('../middleware/perm.middleware');
 // o'zgartirgani uchun tahrir huquqi talab qilinadi.
 router.get('/',        auth(), awaitHF(ctrl.getAll));
 router.get('/:id',     auth(), awaitHF(ctrl.getById));
+// Ombor tahlili — "nega tovar topilmadi?" savoliga javob. Faqat o'qiydi.
+router.get('/:id/tahlil', auth(), awaitHF(ctrl.tahlil));
 
 router.post('/',       auth(), perm('products', 'qoshish'), awaitHF(ctrl.create));
 router.post('/:id/scan',   auth(), perm('products', 'tahrir'), awaitHF(ctrl.scan));
