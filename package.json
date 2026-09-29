@@ -34,7 +34,8 @@
     "forge": {
       "packagerConfig": {
         "icon": "build/icon.ico",
-        "asar": true
+        "asar": true,
+        "ignore": ["^/bot($|/)"]
       },
       "makers": [
         {
