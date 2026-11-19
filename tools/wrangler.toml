@@ -1,0 +1,12 @@
+# Gemini relay — Cloudflare Workers.
+# O'rnatish (shu papkada):
+#   npx wrangler login                 # brauzerda Cloudflare hisobiga kirish (bepul)
+#   npx wrangler deploy                # worker yaratiladi, URL chiqadi
+#   npx wrangler secret put RELAY_TOKEN  # so'ralganda relay tokenini kiriting
+# Keyin POS: Sozlamalar → AI yordamchi → Ulanish:
+#   manzil  https://gemini-relay.<hisob>.workers.dev/v1beta/interactions
+#   token   kiritilgan RELAY_TOKEN
+name = "gemini-relay"
+main = "gemini-relay.worker.js"
+compatibility_date = "2026-01-01"
+workers_dev = true
