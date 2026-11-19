@@ -41,6 +41,14 @@ const KEYS = {
   greeting: 'ai_greeting',
   endpoint:   'ai_endpoint',     // relay manzili (bo'sh = Google to'g'ridan-to'g'ri)
   relayToken: 'ai_relay_token',  // relay'ga kirish paroli (x-relay-token)
+  // Rejim: 'auto' | 'server' | 'browser'.
+  //   server  — Gemini'ga server murojaat qiladi (kalit faqat serverda)
+  //   browser — Gemini'ga kassirning BRAUZERI murojaat qiladi, server faqat
+  //             vositalarni (bazadan ma'lumot) beradi. Server joylashuvi
+  //             Gemini uchun qo'llanmasa (Rossiya) yagona ishlaydigan yo'l.
+  //   auto    — server; joylashuv xatosi ko'rilsa o'z-o'zidan browser'ga o'tadi
+  mode:            'ai_mode',
+  locationBlocked: 'ai_location_blocked',
 };
 
 let cache = { at: 0, cfg: null };
@@ -60,6 +68,8 @@ async function getConfig({ fresh = false } = {}) {
     voice:    (m[KEYS.voice]    || DEFAULTS.voice).trim(),
     thinking: (m[KEYS.thinking] || DEFAULTS.thinking).trim(),
     greeting: bool(m[KEYS.greeting], DEFAULTS.greeting),
+    mode:       ['auto', 'server', 'browser'].includes(m[KEYS.mode]) ? m[KEYS.mode] : 'auto',
+    locationBlocked: m[KEYS.locationBlocked] === 'true',
     endpoint:   (m[KEYS.endpoint] || ENDPOINT).trim(),
     // Relay Sozlamalarda ko'rsatilganmi (bo'lmasa env/standart manzil)
     endpointCustom: !!(m[KEYS.endpoint] || '').trim(),
@@ -67,8 +77,18 @@ async function getConfig({ fresh = false } = {}) {
     // Kalit .env dan kelganmi (UI da "serverda belgilangan" deb ko'rsatiladi)
     keyFromEnv: !m[KEYS.apiKey] && !!process.env.GEMINI_API_KEY,
   };
+  // Amaldagi rejim
+  cfg.effectiveMode = cfg.mode === 'browser' ? 'browser'
+                    : cfg.mode === 'server'  ? 'server'
+                    : (cfg.locationBlocked && !cfg.endpointCustom) ? 'browser' : 'server';
   cache = { at: Date.now(), cfg };
   return cfg;
+}
+
+/** Server joylashuvi Gemini uchun qo'llanmasligi aniqlandi — eslab qolamiz */
+async function markLocationBlocked(blocked = true) {
+  await AppSettingModel.upsert({ key: KEYS.locationBlocked, value: String(!!blocked) }).catch(() => {});
+  cache = { at: 0, cfg: null };
 }
 
 /** Sozlamalarni saqlash. `apiKey` bo'sh/undefined bo'lsa o'zgartirilmaydi. */
@@ -80,6 +100,9 @@ async function saveConfig(patch) {
   if (patch.ttsModel !== undefined) await put(KEYS.ttsModel, String(patch.ttsModel).trim().slice(0, 100));
   if (patch.voice)    await put(KEYS.voice,    String(patch.voice).trim().slice(0, 60));
   if (patch.thinking) await put(KEYS.thinking, String(patch.thinking).trim().slice(0, 20));
+  if (patch.mode !== undefined && ['auto', 'server', 'browser'].includes(patch.mode)) await put(KEYS.mode, patch.mode);
+  // Relay yoki rejim o'zgarsa server yo'lini qayta sinab ko'ramiz
+  if (patch.endpoint !== undefined || patch.mode !== undefined) await put(KEYS.locationBlocked, 'false');
   if (patch.endpoint !== undefined)   await put(KEYS.endpoint,   String(patch.endpoint || '').trim().slice(0, 300));
   if (patch.relayToken !== undefined) await put(KEYS.relayToken, String(patch.relayToken || '').trim().slice(0, 200));
   if (patch.apiKey)   await put(KEYS.apiKey,   String(patch.apiKey).trim());
@@ -130,9 +153,13 @@ async function interact(body, { apiKey, timeoutMs = 60000, endpoint, relayToken 
   try { data = text ? JSON.parse(text) : null; } catch { /* matn qoladi */ }
 
   if (!res.ok) {
-    const gm = data?.error?.message || text?.slice(0, 300) || res.statusText;
+    // Google xatoni ba'zan massiv ichida qaytaradi: [{ error: {...} }]
+    const errObj = (Array.isArray(data) ? data[0]?.error : data?.error) || null;
+    const gm = errObj?.message || text?.slice(0, 300) || res.statusText;
     let msg = `Gemini xatosi (${res.status}): ${gm}`;
     if (/location is not supported/i.test(gm)) {
+      // Server joylashuvi qo'llanmaydi — 'auto' rejim brauzerga o'tadi
+      if (url === ENDPOINT) await markLocationBlocked(true);
       msg = url === ENDPOINT
         ? 'Gemini bu server joylashuvida ishlamaydi (User location is not supported). Sozlamalar → AI yordamchi → "Ulanish" da relay manzilini ko\'rsating (tools/gemini-relay.js ni ruxsat etilgan hududdagi serverda ishga tushiring).'
         : 'Relay joylashuvi ham Gemini uchun qo\'llanmaydi (User location is not supported). Relay\'ni boshqa hududga ko\'chiring.';
@@ -145,7 +172,8 @@ async function interact(body, { apiKey, timeoutMs = 60000, endpoint, relayToken 
       : `Relay manzili topilmadi (404): ${url}`;
     else if (res.status === 429) msg = 'Gemini limiti tugadi (429). Bir ozdan keyin qayta urinib ko\'ring';
     const err = new HttpException(res.status === 429 ? 429 : 502, msg);
-    err.gemini = data?.error || null;
+    err.gemini = errObj;
+    err.locationBlocked = /location is not supported/i.test(gm);
     throw err;
   }
   return data;
@@ -205,6 +233,6 @@ async function synthesize(text, { apiKey, model, voice, endpoint, relayToken } =
 
 module.exports = {
   DEFAULTS, KEYS, ENDPOINT, DEFAULT_ENDPOINT,
-  getConfig, saveConfig, maskKey,
+  getConfig, saveConfig, maskKey, markLocationBlocked,
   interact, extractText, extractCalls, extractAudio, synthesize,
 };

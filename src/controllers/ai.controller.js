@@ -43,13 +43,13 @@ const AUDIO_MIMES = {
 };
 const MAX_AUDIO_B64 = 8 * 1024 * 1024;
 
-// Oddiy chegara: bir foydalanuvchi daqiqada ko'pi bilan 20 so'rov (xarajat himoyasi)
+// Oddiy chegara: bir foydalanuvchi daqiqada ko'pi bilan 30 suhbat so'rovi (xarajat himoyasi)
 const limiter = new Map();
-function checkLimit(userId) {
+function checkLimit(userId, max = 30) {
   const now = Date.now();
   const w = limiter.get(userId) || [];
   const fresh = w.filter(t => now - t < 60000);
-  if (fresh.length >= 20) throw new HttpException(429, 'Juda ko\'p so\'rov. Bir daqiqadan keyin urinib ko\'ring');
+  if (fresh.length >= max) throw new HttpException(429, 'Juda ko\'p so\'rov. Bir daqiqadan keyin urinib ko\'ring');
   fresh.push(now); limiter.set(userId, fresh);
 }
 
@@ -149,16 +149,49 @@ class AiController {
   /** GET /api/v1/ai/status — frontend tugmani ko'rsatish-ko'rsatmaslikni hal qiladi */
   status = async (req, res) => {
     const cfg = await gemini.getConfig();
-    res.json({
+    const out = {
       enabled:    cfg.enabled,
       configured: !!cfg.apiKey,
       model:      cfg.model,
       ttsModel:   cfg.ttsModel,
       voice:      cfg.voice,
       greeting:   cfg.greeting,
+      mode:       cfg.effectiveMode,
       canConfigure: isAdmin(req.currentUser),
       tools:      tools.toolsFor(req.currentUser).map(t => t.name),
-    });
+    };
+    // Brauzer rejimi: Gemini'ga brauzer murojaat qiladi — kalit va manzil
+    // faqat tizimga kirgan (JWT) foydalanuvchiga beriladi.
+    if (cfg.effectiveMode === 'browser' && cfg.enabled && cfg.apiKey) {
+      out.browser = { apiKey: cfg.apiKey, endpoint: gemini.DEFAULT_ENDPOINT, model: cfg.model,
+                      ttsModel: cfg.ttsModel, voice: cfg.voice, thinking: cfg.thinking };
+    }
+    res.json(out);
+  };
+
+  /**
+   * GET /api/v1/ai/context — brauzer rejimi uchun: tizim ko'rsatmasi va
+   * foydalanuvchiga ruxsat etilgan vositalar deklaratsiyasi (har savol oldidan).
+   */
+  context = async (req, res) => {
+    const userTools = tools.toolsFor(req.currentUser);
+    res.json({ systemInstruction: systemInstruction(req, userTools), tools: tools.declarations(userTools) });
+  };
+
+  /**
+   * POST /api/v1/ai/tools/run { name, args } — brauzer rejimida Gemini
+   * so'ragan vositani server bajaradi (filial va ruxsat bilan).
+   */
+  runTool = async (req, res) => {
+    const cfg = await gemini.getConfig();
+    if (!cfg.enabled) throw new HttpException(403, 'AI yordamchi o\'chirilgan');
+    checkLimit(req.currentUser.id, 60);
+    const name = String(req.body?.name || '');
+    const userTools = tools.toolsFor(req.currentUser);
+    if (!userTools.some(t => t.name === name)) return res.json({ result: { xato: `Vosita yo'q yoki ruxsat etilmagan: ${name}` }, actions: [] });
+    const ctx = { user: req.currentUser, branch: req.branch, actions: [] };
+    const result = await tools.runTool(userTools, name, req.body?.args || {}, ctx);
+    res.json({ result, actions: ctx.actions });
   };
 
   /** GET /api/v1/ai/settings (admin) */
@@ -169,6 +202,7 @@ class AiController {
       hasKey: !!cfg.apiKey, keyMasked: gemini.maskKey(cfg.apiKey), keyFromEnv: cfg.keyFromEnv,
       model: cfg.model, ttsModel: cfg.ttsModel, voice: cfg.voice, thinking: cfg.thinking,
       // Ulanish: relay manzili va tokeni (token yashirin ko'rsatiladi)
+      mode: cfg.mode, effectiveMode: cfg.effectiveMode, locationBlocked: cfg.locationBlocked,
       endpoint: cfg.endpoint, defaultEndpoint: gemini.ENDPOINT, isDirect: !cfg.endpointCustom,
       hasRelayToken: !!cfg.relayToken, relayTokenMasked: gemini.maskKey(cfg.relayToken),
       models: MODELS, ttsModels: TTS_MODELS, voices: VOICES, thinkingLevels: THINKING,
@@ -199,6 +233,10 @@ class AiController {
     if (b.thinking !== undefined) {
       if (!THINKING.includes(b.thinking)) throw new HttpException(400, 'thinking qiymati noto\'g\'ri');
       patch.thinking = b.thinking;
+    }
+    if (b.mode !== undefined) {
+      if (!['auto', 'server', 'browser'].includes(b.mode)) throw new HttpException(400, 'Rejim noto\'g\'ri');
+      patch.mode = b.mode;
     }
     if (b.endpoint !== undefined) {
       const u = String(b.endpoint || '').trim();
@@ -231,6 +269,8 @@ class AiController {
   test = async (req, res) => {
     const cfg = await gemini.getConfig({ fresh: true });
     if (!cfg.apiKey) throw new HttpException(400, 'Avval API kalitini saqlang');
+    // Brauzer rejimi: sinovni brauzer o'zi bajaradi (server Gemini'ga yetolmaydi)
+    if (cfg.effectiveMode === 'browser') return res.json({ ok: true, browserMode: true, model: cfg.model });
     const t0 = Date.now();
     const data = await gemini.interact({
       model: cfg.model, store: false,
@@ -285,7 +325,8 @@ class AiController {
     const text = gaplar.join(' ');
 
     const out = { text, configured: !!cfg.apiKey, enabled: cfg.enabled };
-    if (req.query.speak === '1' && cfg.apiKey && cfg.enabled) {
+    out.mode = cfg.effectiveMode;
+    if (req.query.speak === '1' && cfg.apiKey && cfg.enabled && cfg.effectiveMode !== 'browser') {
       const { audio, ttsError } = await ovozlashtir(cfg, text);
       out.audio = audio; if (ttsError) out.ttsError = ttsError;
     }
@@ -313,6 +354,9 @@ class AiController {
     const cfg = await gemini.getConfig();
     if (!cfg.enabled) throw new HttpException(403, 'AI yordamchi o\'chirilgan (Sozlamalar → AI yordamchi)');
     if (!cfg.apiKey) throw new HttpException(503, 'Gemini API kaliti kiritilmagan (Sozlamalar → AI yordamchi)');
+    if (cfg.effectiveMode === 'browser') {
+      const e = new HttpException(409, 'Brauzer rejimi: Gemini\'ga brauzer murojaat qiladi'); e.data = { code: 'BROWSER_MODE' }; throw e;
+    }
     checkLimit(req.currentUser.id);
 
     const body = req.body || {};
