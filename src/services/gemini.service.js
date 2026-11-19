@@ -13,8 +13,12 @@
 const AppSettingModel = require('../models/app_setting.model');
 const HttpException   = require('../utils/HttpException.utils');
 
-const ENDPOINT = process.env.GEMINI_ENDPOINT
-  || 'https://generativelanguage.googleapis.com/v1beta/interactions';
+// Google'ning asl manzili. Server joylashuvi Gemini uchun qo'llanmasa
+// (masalan Rossiyadagi VPS: "User location is not supported") so'rovlar
+// ruxsat etilgan hududdagi RELAY orqali yuboriladi — manzil Sozlamalarda
+// (`ai_endpoint`) yoki GEMINI_ENDPOINT da. Relay `tools/gemini-relay.js`.
+const DEFAULT_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
+const ENDPOINT = process.env.GEMINI_ENDPOINT || DEFAULT_ENDPOINT;
 
 // Standart qiymatlar — Sozlamalarda o'zgartirilishi mumkin
 const DEFAULTS = {
@@ -35,6 +39,8 @@ const KEYS = {
   voice:    'ai_voice',
   thinking: 'ai_thinking',
   greeting: 'ai_greeting',
+  endpoint:   'ai_endpoint',     // relay manzili (bo'sh = Google to'g'ridan-to'g'ri)
+  relayToken: 'ai_relay_token',  // relay'ga kirish paroli (x-relay-token)
 };
 
 let cache = { at: 0, cfg: null };
@@ -54,6 +60,10 @@ async function getConfig({ fresh = false } = {}) {
     voice:    (m[KEYS.voice]    || DEFAULTS.voice).trim(),
     thinking: (m[KEYS.thinking] || DEFAULTS.thinking).trim(),
     greeting: bool(m[KEYS.greeting], DEFAULTS.greeting),
+    endpoint:   (m[KEYS.endpoint] || ENDPOINT).trim(),
+    // Relay Sozlamalarda ko'rsatilganmi (bo'lmasa env/standart manzil)
+    endpointCustom: !!(m[KEYS.endpoint] || '').trim(),
+    relayToken: (m[KEYS.relayToken] || process.env.GEMINI_RELAY_TOKEN || '').trim(),
     // Kalit .env dan kelganmi (UI da "serverda belgilangan" deb ko'rsatiladi)
     keyFromEnv: !m[KEYS.apiKey] && !!process.env.GEMINI_API_KEY,
   };
@@ -70,6 +80,8 @@ async function saveConfig(patch) {
   if (patch.ttsModel !== undefined) await put(KEYS.ttsModel, String(patch.ttsModel).trim().slice(0, 100));
   if (patch.voice)    await put(KEYS.voice,    String(patch.voice).trim().slice(0, 60));
   if (patch.thinking) await put(KEYS.thinking, String(patch.thinking).trim().slice(0, 20));
+  if (patch.endpoint !== undefined)   await put(KEYS.endpoint,   String(patch.endpoint || '').trim().slice(0, 300));
+  if (patch.relayToken !== undefined) await put(KEYS.relayToken, String(patch.relayToken || '').trim().slice(0, 200));
   if (patch.apiKey)   await put(KEYS.apiKey,   String(patch.apiKey).trim());
   if (patch.apiKey === null) await put(KEYS.apiKey, ''); // kalitni o'chirish
   cache = { at: 0, cfg: null };
@@ -88,18 +100,20 @@ function maskKey(key) {
  * Xatolarni HttpException ga aylantiradi: 401/403 → kalit noto'g'ri,
  * 429 → limit, 404 → model topilmadi.
  */
-async function interact(body, { apiKey, timeoutMs = 60000 } = {}) {
+async function interact(body, { apiKey, timeoutMs = 60000, endpoint, relayToken } = {}) {
   if (!apiKey) throw new HttpException(503, 'AI sozlanmagan: Gemini API kaliti kiritilmagan');
+  const url = (endpoint || ENDPOINT).trim();
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res, text;
   try {
-    res = await fetch(ENDPOINT, {
+    res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-goog-api-key': apiKey,
+        ...(relayToken ? { 'x-relay-token': relayToken } : {}),
       },
       body: JSON.stringify(body),
       signal: ctrl.signal,
@@ -118,9 +132,17 @@ async function interact(body, { apiKey, timeoutMs = 60000 } = {}) {
   if (!res.ok) {
     const gm = data?.error?.message || text?.slice(0, 300) || res.statusText;
     let msg = `Gemini xatosi (${res.status}): ${gm}`;
-    if (res.status === 400 && /API key|api_key/i.test(gm)) msg = 'Gemini API kaliti noto\'g\'ri';
+    if (/location is not supported/i.test(gm)) {
+      msg = url === ENDPOINT
+        ? 'Gemini bu server joylashuvida ishlamaydi (User location is not supported). Sozlamalar → AI yordamchi → "Ulanish" da relay manzilini ko\'rsating (tools/gemini-relay.js ni ruxsat etilgan hududdagi serverda ishga tushiring).'
+        : 'Relay joylashuvi ham Gemini uchun qo\'llanmaydi (User location is not supported). Relay\'ni boshqa hududga ko\'chiring.';
+    }
+    else if (res.status === 401 && /relay/i.test(gm)) msg = 'Relay token noto\'g\'ri (x-relay-token). Sozlamalardagi relay tokenini tekshiring.';
+    else if (res.status === 400 && /API key|api_key/i.test(gm)) msg = 'Gemini API kaliti noto\'g\'ri';
     else if (res.status === 401 || res.status === 403) msg = 'Gemini API kaliti rad etildi (noto\'g\'ri yoki ruxsati yo\'q)';
-    else if (res.status === 404) msg = `Model topilmadi: ${body.model}. Sozlamalarda boshqa modelni tanlang`;
+    else if (res.status === 404) msg = url === ENDPOINT || /model/i.test(gm)
+      ? `Model topilmadi: ${body.model}. Sozlamalarda boshqa modelni tanlang`
+      : `Relay manzili topilmadi (404): ${url}`;
     else if (res.status === 429) msg = 'Gemini limiti tugadi (429). Bir ozdan keyin qayta urinib ko\'ring';
     const err = new HttpException(res.status === 429 ? 429 : 502, msg);
     err.gemini = data?.error || null;
@@ -159,7 +181,7 @@ function extractAudio(steps = []) {
  * Matnni ovozga aylantirish (TTS). Natija: { mime, data(base64) }.
  * Avval mp3 so'raladi (hajmi 5-6 marta kichik), server rad etsa wav.
  */
-async function synthesize(text, { apiKey, model, voice } = {}) {
+async function synthesize(text, { apiKey, model, voice, endpoint, relayToken } = {}) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 900);
   if (!clean) return null;
   const base = {
@@ -170,11 +192,11 @@ async function synthesize(text, { apiKey, model, voice } = {}) {
   };
   let data;
   try {
-    data = await interact({ ...base, response_format: { type: 'audio', mime_type: 'audio/mp3' } }, { apiKey, timeoutMs: 45000 });
+    data = await interact({ ...base, response_format: { type: 'audio', mime_type: 'audio/mp3' } }, { apiKey, timeoutMs: 45000, endpoint, relayToken });
   } catch (e) {
     if (e.status !== 502) throw e;
     // mime_type qabul qilinmadi — standart (wav)
-    data = await interact({ ...base, response_format: { type: 'audio' } }, { apiKey, timeoutMs: 45000 });
+    data = await interact({ ...base, response_format: { type: 'audio' } }, { apiKey, timeoutMs: 45000, endpoint, relayToken });
   }
   const audio = extractAudio(data?.steps);
   if (!audio) throw new HttpException(502, 'Gemini ovoz qaytarmadi');
@@ -182,7 +204,7 @@ async function synthesize(text, { apiKey, model, voice } = {}) {
 }
 
 module.exports = {
-  DEFAULTS, KEYS, ENDPOINT,
+  DEFAULTS, KEYS, ENDPOINT, DEFAULT_ENDPOINT,
   getConfig, saveConfig, maskKey,
   interact, extractText, extractCalls, extractAudio, synthesize,
 };

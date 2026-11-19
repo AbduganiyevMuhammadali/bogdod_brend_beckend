@@ -136,7 +136,7 @@ function ajratTranskript(text) {
 async function ovozlashtir(cfg, text) {
   if (!cfg.ttsModel || cfg.ttsModel === 'browser') return { audio: null };
   try {
-    const audio = await gemini.synthesize(text, { apiKey: cfg.apiKey, model: cfg.ttsModel, voice: cfg.voice });
+    const audio = await gemini.synthesize(text, { apiKey: cfg.apiKey, model: cfg.ttsModel, voice: cfg.voice, endpoint: cfg.endpoint, relayToken: cfg.relayToken });
     return { audio };
   } catch (e) {
     console.log('[AI] TTS xatosi:', e.message);
@@ -168,6 +168,9 @@ class AiController {
       enabled: cfg.enabled, greeting: cfg.greeting,
       hasKey: !!cfg.apiKey, keyMasked: gemini.maskKey(cfg.apiKey), keyFromEnv: cfg.keyFromEnv,
       model: cfg.model, ttsModel: cfg.ttsModel, voice: cfg.voice, thinking: cfg.thinking,
+      // Ulanish: relay manzili va tokeni (token yashirin ko'rsatiladi)
+      endpoint: cfg.endpoint, defaultEndpoint: gemini.ENDPOINT, isDirect: !cfg.endpointCustom,
+      hasRelayToken: !!cfg.relayToken, relayTokenMasked: gemini.maskKey(cfg.relayToken),
       models: MODELS, ttsModels: TTS_MODELS, voices: VOICES, thinkingLevels: THINKING,
     });
   };
@@ -197,6 +200,19 @@ class AiController {
       if (!THINKING.includes(b.thinking)) throw new HttpException(400, 'thinking qiymati noto\'g\'ri');
       patch.thinking = b.thinking;
     }
+    if (b.endpoint !== undefined) {
+      const u = String(b.endpoint || '').trim();
+      if (u && !/^https?:\/\/[^\s]+$/i.test(u)) throw new HttpException(400, 'Relay manzili http(s):// bilan boshlanishi kerak');
+      patch.endpoint = u; // bo'sh = Google to'g'ridan-to'g'ri
+    }
+    if (b.relayToken !== undefined) {
+      const t = String(b.relayToken || '').trim();
+      if (t === '__delete__') patch.relayToken = '';
+      else if (t && !t.includes('•')) {
+        if (/\s/.test(t) || t.length < 8) throw new HttpException(400, 'Relay token kamida 8 belgi, bo\'sh joysiz');
+        patch.relayToken = t;
+      }
+    }
     if (b.apiKey !== undefined) {
       if (b.apiKey === null || b.apiKey === '') { /* o'zgartirilmaydi */ }
       else if (b.apiKey === '__delete__') patch.apiKey = null;
@@ -220,7 +236,7 @@ class AiController {
       model: cfg.model, store: false,
       system_instruction: 'Faqat o\'zbek tilida, bitta qisqa gap bilan javob ber.',
       input: 'Salom! Ishga tayyormisan? Bir gapda javob ber.',
-    }, { apiKey: cfg.apiKey, timeoutMs: 30000 });
+    }, { apiKey: cfg.apiKey, timeoutMs: 30000, endpoint: cfg.endpoint, relayToken: cfg.relayToken });
     const text = gemini.extractText(data?.steps) || '(bo\'sh javob)';
     const out = { ok: true, model: cfg.model, text, ms: Date.now() - t0 };
     if (req.body?.speak !== false) {
@@ -284,7 +300,7 @@ class AiController {
     const text = String(req.body?.text || '').trim();
     if (!text) throw new HttpException(400, 'Matn bo\'sh');
     checkLimit(req.currentUser.id);
-    const audio = await gemini.synthesize(text, { apiKey: cfg.apiKey, model: cfg.ttsModel === 'browser' ? gemini.DEFAULTS.ttsModel : cfg.ttsModel, voice: cfg.voice });
+    const audio = await gemini.synthesize(text, { apiKey: cfg.apiKey, model: cfg.ttsModel === 'browser' ? gemini.DEFAULTS.ttsModel : cfg.ttsModel, voice: cfg.voice, endpoint: cfg.endpoint, relayToken: cfg.relayToken });
     res.json(audio);
   };
 
@@ -333,7 +349,7 @@ class AiController {
       };
       let data;
       try {
-        data = await gemini.interact(reqBody, { apiKey: cfg.apiKey, timeoutMs: 60000 });
+        data = await gemini.interact(reqBody, { apiKey: cfg.apiKey, timeoutMs: 60000, endpoint: cfg.endpoint, relayToken: cfg.relayToken });
       } catch (e) {
         // Model thinking_level ni qo'llamasa — usiz qayta
         if (thinking && e.status === 502 && /thinking/i.test(e.message)) { thinking = null; i--; continue; }
