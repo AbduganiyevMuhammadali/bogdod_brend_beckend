@@ -19,12 +19,14 @@ const debtorRouter       = require('../routes/debtor.route');
 const botRouter          = require('../routes/bot.route');
 const snapshotRouter     = require('../routes/snapshot.route');
 const branchRouter       = require('../routes/branch.route');
+const aiRouter           = require('../routes/ai.route');
 const HttpException = require('../utils/HttpException.utils');
 
 module.exports = async function(app){
      // parse requests of content-type: application/json
         // parses incoming requests with JSON payloads
-        app.use(express.json());
+        // 8mb — AI yordamchiga ovozli xabar (base64 audio) yuboriladi
+        app.use(express.json({ limit: '8mb' }));
         // enabling cors for all requests by using cors middleware
         app.use(cors());
         // Enable pre-flight
@@ -49,6 +51,7 @@ module.exports = async function(app){
         app.use('/api/v1/bot',           botRouter);
         app.use('/api/v1/snapshots',     snapshotRouter);
         app.use('/api/v1/branches',      branchRouter);
+        app.use('/api/v1/ai',            aiRouter);
             
         // 404 error
         app.all('*', (req, res, next) => {
