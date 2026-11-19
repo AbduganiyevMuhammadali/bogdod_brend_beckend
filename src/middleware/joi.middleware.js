@@ -13,7 +13,8 @@ const middleware = (schema, property) => {
       console.log(`Validation error: ${ message }`);
       next(error);
     }else{
-      console.log(value);
+      // So'rov tanasi logga chiqarilmaydi: login/parol va mijoz ma'lumotlari
+      // pm2 loglarida ochiq matnda qolib ketardi.
       req.body = value;
       next();
     }
