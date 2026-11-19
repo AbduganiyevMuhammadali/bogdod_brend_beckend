@@ -26,4 +26,7 @@ const sequelize = new Sequelize(
 );
 
 
+// Filial filtri — `branch_id` ustuni bor modellarga avtomatik qo'llanadi
+require('./branchScope').install(sequelize);
+
 module.exports = sequelize;

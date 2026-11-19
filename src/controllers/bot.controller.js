@@ -9,6 +9,11 @@ const SaleModel          = require('../models/sale.model')
 const ClientModel        = require('../models/client.model')
 const HttpException      = require('../utils/HttpException.utils')
 const config             = require('../startup/config')
+const { requireBranchId } = require('../utils/branchContext')
+const BranchModel        = require('../models/branch.model')
+
+// Botda ko'rinadigan do'kon nomi — filial nomi
+const dokonNomi = (req) => req.branch?.name || config.db_name
 
 // Kun chegarasi mahalliy vaqtda
 function kunOraligi(sana) {
@@ -92,10 +97,11 @@ class BotController {
       last_seen: new Date(),
     })
 
+    const branch = await BranchModel.findByPk(link.branch_id)
     res.json({
       ok: true,
       token,
-      shop: config.db_name,   // do'kon nomi — botda ko'rsatiladi
+      shop: branch?.name || config.db_name,   // filial nomi — botda ko'rsatiladi
     })
   }
 
@@ -141,9 +147,12 @@ class BotController {
         SUM(CASE WHEN due_date < ? THEN 1 ELSE 0 END) kech_n,
         SUM(CASE WHEN due_date < ? THEN debt_sum ELSE 0 END) kech_s,
         COUNT(*) jami_n, SUM(debt_sum) jami_s
-      FROM sale
-      WHERE debt_sum > 0 AND status <> 'cancelled'
-    `, { replacements: [bugun, bugun, bugun, bugun] }).catch(() => [[{}]])
+      FROM (
+        SELECT due_date, (debt_sum - debt_paid) debt_sum
+          FROM sale
+         WHERE (debt_sum - debt_paid) > 0.005 AND status <> 'cancelled' AND branch_id = ?
+      ) q
+    `, { replacements: [bugun, bugun, bugun, bugun, requireBranchId()] }).catch(() => [[{}]])
     const q = (qarz && qarz[0]) || {}
 
     // ── Kam qolgan tovarlar ────────────────────────────────────────
@@ -158,7 +167,7 @@ class BotController {
     await link.update({ last_seen: new Date() })
 
     res.json({
-      shop:   config.db_name,
+      shop:   dokonNomi(req),
       sana:   bugun,
       bugun: {
         sotuvlar: Number(k?.sotuvlar) || 0,
@@ -195,17 +204,18 @@ class BotController {
 
     const [rows] = await sequelize.query(`
       SELECT c.name, c.phone,
-             SUM(s.debt_sum) qarz,
+             SUM(s.debt_sum - s.debt_paid) qarz,
              MIN(s.due_date)  muddat,
              MIN(s.date)      birinchi_xarid,
              MAX(s.date)      oxirgi_xarid,
              COUNT(*)         hujjatlar
         FROM sale s JOIN client c ON c.id = s.client_id
-       WHERE s.debt_sum > 0 AND s.status <> 'cancelled' ${shart}
+       WHERE (s.debt_sum - s.debt_paid) > 0.005 AND s.status <> 'cancelled'
+         AND s.branch_id = ? ${shart}
        GROUP BY s.client_id
        ORDER BY (MIN(s.due_date) IS NULL), MIN(s.due_date) ASC
        LIMIT 40
-    `).catch(() => [[]])
+    `, { replacements: [requireBranchId()] }).catch(() => [[]])
 
     // MySQL DATETIME ni Date obyekt sifatida qaytaradi va `String()`
     // uni "Mon Aug 10" ga aylantiradi — sanani ISO shaklga keltiramiz.
@@ -291,7 +301,7 @@ class BotController {
     const tannarx = Number(p?.tannarx) || 0
 
     res.json({
-      shop: config.db_name, davr,
+      shop: dokonNomi(req), davr,
       sotuvlar: Number(k?.sotuvlar) || 0,
       tushum:   Number(k?.tushum)   || 0,
       qarz:     Number(k?.qarz)     || 0,
@@ -438,7 +448,7 @@ class BotController {
     if (ids.length) {
       const [dues] = await sequelize.query(
         `SELECT client_id, MIN(due_date) muddat, COUNT(*) hujjat
-           FROM sale WHERE debt_sum > 0 AND status <> 'cancelled'
+           FROM sale WHERE (debt_sum - debt_paid) > 0.005 AND status <> 'cancelled'
             AND client_id IN (${ids.map(Number).join(',')})
           GROUP BY client_id`
       ).catch(() => [[]])
@@ -501,7 +511,7 @@ class BotController {
       attributes: ['chat_id'],
       raw: true,
     })
-    res.json({ shop: config.db_name, chats: rows.map(r => r.chat_id) })
+    res.json({ shop: dokonNomi(req), chats: rows.map(r => r.chat_id) })
   }
 }
 

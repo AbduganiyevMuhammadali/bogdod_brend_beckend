@@ -9,6 +9,9 @@ class UserModel extends Model {
 }
 
 UserModel.init({
+    // Filial. NULL = bosh ofis (barcha filiallarni ko'ra oladi, X-Branch-Id
+    // sarlavhasi bilan tanlaydi). Raqam bo'lsa — faqat shu filialda ishlaydi.
+    branch_id: { type: DataTypes.INTEGER, allowNull: true, defaultValue: null },
     id: { 
         type: DataTypes.INTEGER, 
         primaryKey: true, 
@@ -63,6 +66,10 @@ UserModel.init({
   tableName: 'user',
   timestamps: true,
   paranoid: true,
+  // Filial filtri avtomatik QO'YILMAYDI: bosh ofis xodimlarida branch_id
+  // NULL bo'ladi va ular hamma filialga tegishli. Kim kimni ko'rishi
+  // user.controller da aniq yoziladi.
+  branchScoped: false,
 });
 
 module.exports = UserModel;

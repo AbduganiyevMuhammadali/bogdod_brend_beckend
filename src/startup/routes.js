@@ -18,6 +18,7 @@ const backupRouter       = require('../routes/backup.route');
 const debtorRouter       = require('../routes/debtor.route');
 const botRouter          = require('../routes/bot.route');
 const snapshotRouter     = require('../routes/snapshot.route');
+const branchRouter       = require('../routes/branch.route');
 const HttpException = require('../utils/HttpException.utils');
 
 module.exports = async function(app){
@@ -47,6 +48,7 @@ module.exports = async function(app){
         app.use('/api/v1/debtors',       debtorRouter);
         app.use('/api/v1/bot',           botRouter);
         app.use('/api/v1/snapshots',     snapshotRouter);
+        app.use('/api/v1/branches',      branchRouter);
             
         // 404 error
         app.all('*', (req, res, next) => {

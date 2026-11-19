@@ -42,6 +42,9 @@ class BackupController {
 
   // GET /api/v1/backup/download
   download = async (req, res) => {
+    // Nusxa BUTUN bazani (hamma filialni) o'z ichiga oladi — filialga
+    // biriktirilgan admin boshqa filial ma'lumotini olib qo'ymasin
+    if (req.branchLocked) throw new HttpException(403, 'Zaxira nusxa faqat bosh ofis foydalanuvchisiga ochiq');
     const bin = process.env.MYSQLDUMP_PATH || 'mysqldump';
 
     const stamp = new Date().toISOString()
@@ -152,6 +155,7 @@ class BackupController {
 
   // GET /api/v1/backup/info — tugmani ko'rsatishdan oldin holatni bilish
   info = async (req, res) => {
+    if (req.branchLocked) return res.json({ available: false, database: config.db_name, sizeMb: null, reason: 'Faqat bosh ofis' });
     const bin = process.env.MYSQLDUMP_PATH || 'mysqldump';
 
     // mysqldump mavjudmi

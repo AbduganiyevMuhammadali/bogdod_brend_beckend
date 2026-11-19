@@ -10,6 +10,7 @@ const SupplierModel          = require('../models/supplier.model')
 const PurchaseModel          = require('../models/purchase.model')
 const CashTransactionModel   = require('../models/cash_transaction.model')
 const { dateRange, dayRange: dayRangeUtil } = require('../utils/dateRange.utils')
+const { requireBranchId } = require('../utils/branchContext')
 
 // Kun chegaralari mahalliy vaqtda hisoblanadi — dateRange.utils.js ga qarang
 function dayRange(dateStr) {
@@ -56,14 +57,21 @@ class ReportController {
       const r             = saleRows[0] || {}
       const debt_payments = Number(debtRows[0]?.total) || 0
       const sale_paid     = Number(r.paid) || 0
+      // Davrda kassadan naqd qaytarilgan pul (cash_transaction 'refund').
+      // Alohida ko'rsatiladi: qisman qaytarish sotuv satrini joyida
+      // kamaytiradi, shuning uchun `income` dan yana ayirilmaydi.
+      const refunds = Number(await CashTransactionModel.sum('amount', {
+        where: { type: 'refund', date: dateWhere, branch_id: requireBranchId() },
+      })) || 0
       return {
         sales_count:   Number(r.sales_count) || 0,
         revenue:       Number(r.revenue)     || 0,
         paid:          sale_paid,
         debt:          Number(r.debt)        || 0,
         items:         Number(r.items)       || 0,
-        debt_payments,                           // bugun qabul qilingan qarz to'lovlari
-        income:        sale_paid + debt_payments, // kassaga kirgan jami pul
+        debt_payments,                           // davrda qabul qilingan qarz to'lovlari
+        refunds,                                 // davrda naqd qaytarilgan
+        income:        sale_paid + debt_payments, // sotuv va qarz to'lovidan kirgan pul
       }
     }
 
@@ -77,7 +85,7 @@ class ReportController {
     // saqlanadi (ulanish `timezone: '+05:00'` bilan ochiladi), shuning
     // uchun HOUR() to'g'ridan-to'g'ri lokal soatni beradi.
     const hourly = await KassaRegisterModel.findAll({
-      where: { status: 'completed', date: { [Op.gte]: today } },
+      where: { status: 'completed', date: { [Op.gte]: today }, sale_id: { [Op.not]: null } },
       attributes: [
         [fn('HOUR', col('date')), 'hour'],
         // Chegirmadan keyingi haqiqiy tushum
@@ -176,8 +184,8 @@ class ReportController {
         COALESCE(SUM(CASE WHEN qty > 0 AND qty <= min_qty THEN 1 ELSE 0 END), 0) kam,
         COALESCE(SUM(CASE WHEN qty < 0 THEN 1 ELSE 0 END), 0) manfiy
       FROM \`product\`
-      WHERE is_folder = 0 AND active = 1`,
-      { type: sequelize.QueryTypes.SELECT })
+      WHERE is_folder = 0 AND active = 1 AND branch_id = :bid`,
+      { replacements: { bid: requireBranchId() }, type: sequelize.QueryTypes.SELECT })
 
     // Ombor qiymati — FIFO partiyalari bo'yicha (haqiqiy tannarx).
     // `purchase_item.stock_qty` × `cost_price` — bu omborda turgan
@@ -188,15 +196,15 @@ class ReportController {
         COALESCE(SUM(pi.stock_qty), 0) partiya_dona
       FROM \`purchase_item\` pi
       JOIN \`product\` p ON p.id = pi.product_id
-      WHERE pi.stock_qty > 0 AND p.is_folder = 0 AND p.active = 1`,
-      { type: sequelize.QueryTypes.SELECT })
+      WHERE pi.stock_qty > 0 AND p.is_folder = 0 AND p.active = 1 AND p.branch_id = :bid`,
+      { replacements: { bid: requireBranchId() }, type: sequelize.QueryTypes.SELECT })
 
     // Sotuv narxidagi qiymat — sotilsa qancha pul tushishi
     const [sotuvQiymat] = await sequelize.query(`
       SELECT COALESCE(SUM(qty * retail_price), 0) sotuv_qiymati
       FROM \`product\`
-      WHERE is_folder = 0 AND active = 1 AND qty > 0`,
-      { type: sequelize.QueryTypes.SELECT })
+      WHERE is_folder = 0 AND active = 1 AND qty > 0 AND branch_id = :bid`,
+      { replacements: { bid: requireBranchId() }, type: sequelize.QueryTypes.SELECT })
 
     // ── Ro'yxat ──────────────────────────────────────────────────
     const offset = (Number(page) - 1) * Number(limit)
@@ -294,10 +302,10 @@ class ReportController {
     const kategoriyalar = await sequelize.query(`
       SELECT category nomi, COUNT(*) xil, COALESCE(SUM(qty), 0) dona
       FROM \`product\`
-      WHERE is_folder = 0 AND active = 1 AND qty > 0
+      WHERE is_folder = 0 AND active = 1 AND qty > 0 AND branch_id = :bid
         AND category IS NOT NULL AND category <> ''
       GROUP BY category ORDER BY dona DESC`,
-      { type: sequelize.QueryTypes.SELECT })
+      { replacements: { bid: requireBranchId() }, type: sequelize.QueryTypes.SELECT })
 
     res.json({
       total: count,
@@ -364,7 +372,9 @@ class ReportController {
       attributes: [
         'client_id',
         'client_name',
-        [fn('COUNT', col('id')),          'sales_count'],
+        // Faqat sotuv hujjatlari — qarz to'lovi satrlari (sale_id NULL) sanalmasin
+        [fn('SUM', literal('sale_id IS NOT NULL')), 'sales_count'],
+        [fn('SUM', literal('CASE WHEN sale_id IS NULL THEN paid_sum ELSE 0 END')), 'debt_payments'],
         // Chegirmadan keyingi haqiqiy savdo
         [fn('SUM', literal('total_sum - COALESCE(discount, 0)')), 'total_sum'],
         [fn('SUM',   col('paid_sum')),    'paid_sum'],
@@ -396,7 +406,8 @@ class ReportController {
         phone:       cli.phone || '',
         sales_count: Number(r.sales_count) || 0,
         total_sum:   Number(r.total_sum)   || 0,
-        paid_sum:    Number(r.paid_sum)    || 0,
+        paid_sum:    Number(r.paid_sum)    || 0,     // sotuvda + qarz to'lovi (davrda kirgan pul)
+        debt_payments: Number(r.debt_payments) || 0,
         debt_sum:    Number(r.debt_sum)    || 0,
         balance:     Number(cli.balance)   || 0,
       }
@@ -416,7 +427,8 @@ class ReportController {
       attributes: [
         'cashier_id',
         'cashier_name',
-        [fn('COUNT', col('id')),          'sales_count'],
+        [fn('SUM', literal('sale_id IS NOT NULL')), 'sales_count'],
+        [fn('SUM', literal('CASE WHEN sale_id IS NULL THEN paid_sum ELSE 0 END')), 'debt_payments'],
         // Chegirmadan keyingi haqiqiy savdo
         [fn('SUM', literal('total_sum - COALESCE(discount, 0)')), 'total_sum'],
         [fn('SUM',   col('paid_sum')),    'paid_sum'],
@@ -433,6 +445,7 @@ class ReportController {
       cashier_id:      r.cashier_id,
       cashier_name:    r.cashier_name || 'Noma\'lum',
       sales_count:     Number(r.sales_count)     || 0,
+      debt_payments:   Number(r.debt_payments)   || 0,
       total_sum:       Number(r.total_sum)       || 0,
       paid_sum:        Number(r.paid_sum)        || 0,
       debt_sum:        Number(r.debt_sum)        || 0,
@@ -774,9 +787,17 @@ class ReportController {
       const rev = Number(rows[0]?.revenue) || 0
       return { revenue: rev, profit: rev - (Number(rows[0]?.cost) || 0) }
     }
+    // Sof foyda uchun xarajatlar: faqat kassadan chiqqan haqiqiy xarajatlar
+    // (ijara, maosh, ...). Yetkazuvchiga to'lov — tovar uchun pul, uning
+    // tannarxi foydada allaqachon ayrilgan; qayta ayirsak foyda ikki marta kamayardi.
     async function expensesSum(fromDate) {
       const s = await CashTransactionModel.sum('amount', {
-        where: { type: 'expense', date: { [Op.between]: [fromDate, todayEnd] } },
+        where: {
+          type: 'expense',
+          date: { [Op.between]: [fromDate, todayEnd] },
+          branch_id: requireBranchId(),
+          [Op.or]: [{ reference_type: null }, { reference_type: { [Op.ne]: 'supplier_payment' } }],
+        },
       })
       return Number(s) || 0
     }
@@ -894,7 +915,8 @@ class ReportController {
       attributes: [
         'cashier_id',
         'cashier_name',
-        [fn('COUNT', col('id')),          'sales_count'],
+        [fn('SUM', literal('sale_id IS NOT NULL')), 'sales_count'],
+        [fn('SUM', literal('CASE WHEN sale_id IS NULL THEN paid_sum ELSE 0 END')), 'debt_payments'],
         [fn('SUM',   col('total_sum')),   'total_sum'],
         [fn('SUM',   col('paid_sum')),    'paid_sum'],
         [fn('SUM',   col('item_count')),  'items'],
@@ -951,13 +973,13 @@ class ReportController {
     })
 
     const result = await Promise.all(suppliers.map(async (s) => {
-      const purchaseWhere = { supplier_id: s.id, status: 'confirmed' }
+      const purchaseWhere = { supplier_id: s.id, status: 'confirmed', branch_id: requireBranchId() }
       if (date_from || date_to) {
         purchaseWhere.date = {}
         Object.assign(purchaseWhere.date, dateRange(Op, date_from, date_to) || {})
       }
 
-      const payWhere = { reference_type: 'supplier_payment', reference_id: s.id }
+      const payWhere = { reference_type: 'supplier_payment', reference_id: s.id, branch_id: requireBranchId() }
       if (date_from || date_to) {
         payWhere.date = {}
         Object.assign(payWhere.date, dateRange(Op, date_from, date_to) || {})
@@ -1014,12 +1036,14 @@ class ReportController {
       raw: true,
     })
 
-    const summary = { completed: 0, cancelled: 0, paid: 0, debt: 0, discount: 0 }
+    const summary = { completed: 0, cancelled: 0, paid: 0, debt: 0, discount: 0, debt_payments: 0, sales_count: 0 }
     rows.filter(r => r.status === 'completed').forEach(r => {
       summary.completed += Number(r.total_sum) || 0
       summary.paid      += Number(r.paid_sum)  || 0
       summary.debt      += Number(r.debt_sum)  || 0
       summary.discount  += Number(r.discount)  || 0
+      if (r.sale_id) summary.sales_count++
+      else summary.debt_payments += Number(r.paid_sum) || 0
     })
     rows.filter(r => r.status === 'cancelled').forEach(r => {
       summary.cancelled += Number(r.total_sum) || 0

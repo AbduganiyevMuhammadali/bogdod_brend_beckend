@@ -6,6 +6,7 @@ const CashTransactionModel  = require('../models/cash_transaction.model')
 
 const HttpException         = require('../utils/HttpException.utils')
 const BaseController        = require('./BaseController')
+const { requireBranchId }   = require('../utils/branchContext')
 
 class SupplierController extends BaseController {
 
@@ -115,8 +116,9 @@ class SupplierController extends BaseController {
     if (!s) throw new HttpException(404, req.mf('data not found'))
 
     // Balansni entries dan hisoblash (ishonchli)
-    const purchasesTotal = await PurchaseModel.sum('total_sum', { where: { supplier_id: s.id, status: 'confirmed' } }) || 0
-    const paymentsTotal  = await CashTransactionModel.sum('amount', { where: { reference_type: 'supplier_payment', reference_id: s.id } }) || 0
+    const bid = requireBranchId()
+    const purchasesTotal = await PurchaseModel.sum('total_sum', { where: { supplier_id: s.id, status: 'confirmed', branch_id: bid } }) || 0
+    const paymentsTotal  = await CashTransactionModel.sum('amount', { where: { reference_type: 'supplier_payment', reference_id: s.id, branch_id: bid } }) || 0
     const trueBalance    = paymentsTotal - purchasesTotal
     const debt = Math.abs(Math.min(0, trueBalance))
     if (amt > debt + 0.01) throw new HttpException(400, `Qarz miqdoridan ko'p to'lab bo'lmaydi. Qarz: ${debt}`)

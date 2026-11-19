@@ -3,7 +3,16 @@ const sequelize        = require('../db/db-sequelize')
 const ClientModel      = require('../models/client.model')
 const ClientNoteModel  = require('../models/client_note.model')
 const SaleModel        = require('../models/sale.model')
+const CashTransactionModel = require('../models/cash_transaction.model')
 const HttpException    = require('../utils/HttpException.utils')
+const { requireBranchId } = require('../utils/branchContext')
+const { syncClientDebt, r2 } = require('../utils/clientDebt.utils')
+
+// Qolgan qarz = qarz − to'langan. Qarz to'lovlari sotuvlarga eng
+// eskisidan taqsimlanadi (utils/clientDebt.utils.js), shuning uchun
+// ro'yxatda faqat HAQIQATAN ochiq qarzlar ko'rinadi.
+const QOLGAN = literal('(`debt_sum` - `debt_paid`)')
+const OCHIQ  = literal('(`debt_sum` - `debt_paid`) > 0.005')
 
 /**
  * Qarzdorlar bo'limi (CRM).
@@ -27,7 +36,8 @@ function bugunKey() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 function kunQoshish(kunKey, n) {
-  const d = new Date(kunKey)
+  const [y, m, dd] = String(kunKey).split('-').map(Number)
+  const d = new Date(y, m - 1, dd)   // mahalliy kun (UTC siljishi bo'lmasin)
   d.setDate(d.getDate() + n)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
@@ -72,15 +82,15 @@ class DebtorController {
     const rows = await SaleModel.findAll({
       attributes: [
         'client_id',
-        [fn('SUM', col('debt_sum')), 'qarz'],
+        [fn('SUM', QOLGAN),          'qarz'],
         [fn('COUNT', col('id')),     'sotuvlar'],
         [fn('MIN', col('due_date')), 'eng_yaqin'],
         [fn('MAX', col('date')),     'oxirgi_sotuv'],
       ],
       where: {
-        debt_sum: { [Op.gt]: 0 },
         client_id: { [Op.ne]: null },
         status: { [Op.ne]: 'cancelled' },
+        [Op.and]: [OCHIQ],
       },
       group: ['client_id'],
       raw: true,
@@ -177,21 +187,24 @@ class DebtorController {
 
     const bugun = bugunKey()
 
-    // Qarzli sotuvlar
+    // Balans va qarz taqsimoti yangilangan bo'lsin
+    const hisob = await syncClientDebt(id)
+
+    // Ochiq qarzli sotuvlar (to'liq to'langanlari ro'yxatdan chiqadi)
     const sales = await SaleModel.findAll({
       where: {
         client_id: id,
-        debt_sum: { [Op.gt]: 0 },
         status: { [Op.ne]: 'cancelled' },
+        [Op.and]: [OCHIQ],
       },
       order: [['due_date', 'ASC'], ['date', 'ASC']],
     })
 
-    // To'lovlar tarixi
-    const CashTransactionModel = require('../models/cash_transaction.model')
+    // To'lovlar tarixi — mijoz bo'yicha (ilgari `reference_id` bo'yicha
+    // qidirilardi, u to'ldirilmagani uchun ro'yxat doim bo'sh chiqardi)
     const payments = await CashTransactionModel.findAll({
-      where: { type: 'debt_payment', reference_id: id },
-      order: [['date', 'DESC']],
+      where: { type: 'debt_payment', client_id: id },
+      order: [['date', 'DESC'], ['id', 'DESC']],
       limit: 100,
     }).catch(() => [])
 
@@ -204,7 +217,8 @@ class DebtorController {
     res.json({
       client: {
         id: client.id, name: client.name, phone: client.phone,
-        address: client.address, balance: Number(client.balance) || 0,
+        address: client.address, balance: hisob.balance,
+        qarz: hisob.qarz, kredit: hisob.kredit,
         status: client.status || 'faol',
         tags: Array.isArray(client.tags) ? client.tags : [],
         comment: client.comment || '',
@@ -214,7 +228,10 @@ class DebtorController {
         docNumber: s.doc_number,
         date: s.date,
         total: Number(s.total_sum) || 0,
-        debt: Number(s.debt_sum) || 0,
+        // `debt` — QOLGAN qarz (frontend shuni ko'rsatadi), `debtTotal` — asl qarz
+        debt: r2(Number(s.debt_sum) - Number(s.debt_paid)),
+        debtTotal: Number(s.debt_sum) || 0,
+        debtPaid:  Number(s.debt_paid) || 0,
         dueDate: s.due_date ? String(s.due_date).slice(0, 10) : null,
         muddat: muddatToifasi(s.due_date, bugun),
       })),
@@ -259,7 +276,7 @@ class DebtorController {
   updateDue = async (req, res) => {
     const sale = await SaleModel.findByPk(req.params.saleId)
     if (!sale) throw new HttpException(404, 'Sotuv topilmadi')
-    if (Number(sale.debt_sum) <= 0) throw new HttpException(400, 'Bu sotuvda qarz yo\'q')
+    if (Number(sale.debt_sum) - Number(sale.debt_paid) <= 0.005) throw new HttpException(400, 'Bu sotuvda ochiq qarz yo\'q')
 
     const d = req.body.due_date || null
     if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new HttpException(400, 'Sana formati noto\'g\'ri')
@@ -317,8 +334,9 @@ class DebtorController {
       `SELECT n.id, n.client_id, n.text, n.kind, n.remind_at, c.name, c.phone
          FROM client_note n JOIN client c ON c.id = n.client_id
         WHERE n.done = 0 AND n.remind_at IS NOT NULL AND n.remind_at <= ?
+          AND c.branch_id = ?
         ORDER BY n.remind_at ASC LIMIT 100`,
-      { replacements: [bugun] }
+      { replacements: [bugun, requireBranchId()] }
     ).catch(() => [[]])
 
     res.json((rows || []).map(r => ({

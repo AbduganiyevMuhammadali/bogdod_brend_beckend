@@ -41,7 +41,54 @@ module.exports = async function(){
         ['sale_item',        'returned_qty',       'DECIMAL(15,3) NOT NULL DEFAULT 0'],
         // Sotuvdan jami qaytarilgan summa (chegirma hisobga olingan)
         ['sale',             'returned_sum',       'DECIMAL(18,2) NOT NULL DEFAULT 0'],
+        // Qarzdan qancha to'langan (utils/clientDebt.utils.js taqsimlaydi)
+        ['sale',             'debt_paid',          'DECIMAL(18,2) NOT NULL DEFAULT 0'],
+
+        // ── FILIALLAR ───────────────────────────────────────────────
+        // Barcha biznes jadvallarga `branch_id`. DEFAULT 1 — tizim
+        // joriy etilgunga qadar yig'ilgan HAMMA ma'lumot 1-filialga
+        // ("Bogdod brend") tegishli bo'lib qoladi.
+        ['product',          'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['purchase',         'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['purchase_item',    'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['sale',             'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['sale_item',        'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['client',           'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['client_note',      'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['supplier',         'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['cash_transaction', 'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['kassa_register',   'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['product_register', 'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['inventory',        'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['inventory_item',   'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['bot_link',         'branch_id',          'INT NOT NULL DEFAULT 1'],
+        ['stock_snapshot',   'branch_id',          'INT NOT NULL DEFAULT 1'],
+        // Foydalanuvchi: NULL = bosh ofis (hamma filial), raqam = shu filial
+        ['user',             'branch_id',          'INT NULL DEFAULT NULL'],
     ];
+
+    // ── FILIAL jadvali — boshqa hamma narsadan OLDIN ─────────────────
+    // Birinchi filial "Bogdod brend" (id = 1, asosiy). Yuqoridagi
+    // `branch_id ... DEFAULT 1` ustunlari aynan shu satrga ishora qiladi.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS \`branch\` (
+        \`id\`         INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        \`name\`       VARCHAR(150) NOT NULL,
+        \`code\`       VARCHAR(30)  DEFAULT NULL,
+        \`address\`    TEXT         DEFAULT NULL,
+        \`phone\`      VARCHAR(30)  DEFAULT NULL,
+        \`is_main\`    TINYINT(1)   NOT NULL DEFAULT 0,
+        \`active\`     TINYINT(1)   NOT NULL DEFAULT 1,
+        \`created_at\` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY \`uq_branch_code\` (\`code\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    await db.query(`
+      INSERT INTO \`branch\` (\`id\`, \`name\`, \`code\`, \`is_main\`, \`active\`)
+      SELECT 1, 'Bogdod brend', 'BOGDOD', 1, 1
+       WHERE NOT EXISTS (SELECT 1 FROM \`branch\`)
+    `);
 
     // supplier jadvalini yaratish (mavjud bo'lmasa)
     await db.query(`
@@ -96,6 +143,59 @@ module.exports = async function(){
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
 
+    // Telegram bot bilan bog'lanish. Har do'kon o'z serverida, bot esa
+    // bitta va umumiy — bog'lanish shu jadval orqali saqlanadi.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS \`bot_link\` (
+        \`id\`              INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        \`chat_id\`         VARCHAR(40)  DEFAULT NULL,
+        \`chat_name\`       VARCHAR(200) DEFAULT NULL,
+        \`pair_code\`       VARCHAR(10)  DEFAULT NULL,
+        \`code_expires_at\` DATETIME     DEFAULT NULL,
+        \`token\`           VARCHAR(120) DEFAULT NULL,
+        \`active\`          TINYINT(1)   NOT NULL DEFAULT 1,
+        \`daily\`           TINYINT(1)   NOT NULL DEFAULT 1,
+        \`last_seen\`       DATETIME     DEFAULT NULL,
+        \`created_by\`      INT          DEFAULT NULL,
+        \`branch_id\`       INT NOT NULL DEFAULT 1,
+        \`created_at\`      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\`      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_bot_token\` (\`token\`),
+        INDEX \`idx_bot_chat\`  (\`chat_id\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+
+    // Mijoz bilan muloqot tarixi (CRM eslatmalari).
+    // Har bir qo'ng'iroq/uchrashuv/va'da shu yerga yoziladi — qarz
+    // undirishda kim nima degani esdan chiqmasin.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS \`client_note\` (
+        \`id\`         INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        \`client_id\`  INT NOT NULL,
+        \`text\`       TEXT NOT NULL,
+        \`kind\`       VARCHAR(20) NOT NULL DEFAULT 'izoh',
+        \`remind_at\`  DATE DEFAULT NULL,
+        \`done\`       TINYINT(1) NOT NULL DEFAULT 0,
+        \`user_id\`    INT DEFAULT NULL,
+        \`user_name\`  VARCHAR(100) DEFAULT NULL,
+        \`branch_id\`  INT NOT NULL DEFAULT 1,
+        \`created_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_note_client\` (\`client_id\`, \`created_at\`),
+        INDEX \`idx_note_remind\` (\`remind_at\`, \`done\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+
+    // Qoldiq "surat"lari (snapshot) — ommaviy o'zgarishdan oldin qoldiqlar
+    // shu jadvalga nusxalanadi va kerak bo'lsa bir buyruq bilan qaytariladi.
+    // Ustun qo'shish siklidan OLDIN: `stock_snapshot.branch_id` shu jadvalga
+    // qo'shiladi.
+    try {
+        await require('../utils/stockGuard.utils').ensureTable();
+    } catch (e) {
+        console.log('stock_snapshot jadvali yaratilmadi:', e.message);
+    }
+
     for (const [table, col, def] of migrations) {
         try {
             await db.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${col}\` ${def}`);
@@ -132,6 +232,23 @@ module.exports = async function(){
         ['product_register', 'idx_pr_date',           '(`date`)'],
         ['product_register', 'idx_pr_pitem',          '(`purchase_item_id`)'],
         ['cash_transaction', 'idx_ct_date',           '(`date`)'],
+        // Filial bo'yicha: har so'rovda `branch_id = ?` sharti bor, shuning
+        // uchun eng ko'p ishlatiladigan jadvallarda (filial, sana) indeks
+        ['product',          'idx_product_branch',    '(`branch_id`, `active`, `is_folder`, `name`)'],
+        ['sale',             'idx_sale_branch_date',  '(`branch_id`, `date`)'],
+        ['sale',             'idx_sale_branch_client','(`branch_id`, `client_id`, `debt_sum`)'],
+        ['kassa_register',   'idx_kr_branch_date',    '(`branch_id`, `status`, `date`)'],
+        ['product_register', 'idx_pr_branch_date',    '(`branch_id`, `status`, `date`)'],
+        ['cash_transaction', 'idx_ct_branch_date',    '(`branch_id`, `type`, `date`)'],
+        ['cash_transaction', 'idx_ct_client',         '(`client_id`, `type`)'],
+        ['cash_transaction', 'idx_ct_ref',            '(`reference_type`, `reference_id`)'],
+        ['purchase',         'idx_purchase_branch',   '(`branch_id`, `status`, `date`)'],
+        ['purchase_item',    'idx_pi_branch_prod',    '(`branch_id`, `product_id`)'],
+        ['client',           'idx_client_branch',     '(`branch_id`, `name`)'],
+        ['supplier',         'idx_supplier_branch',   '(`branch_id`, `name`)'],
+        ['inventory',        'idx_inventory_branch',  '(`branch_id`, `status`)'],
+        ['user',             'idx_user_branch',       '(`branch_id`)'],
+        ['bot_link',         'idx_bot_branch',        '(`branch_id`)'],
     ];
     for (const [table, name, cols] of indexes) {
         try {
@@ -140,58 +257,37 @@ module.exports = async function(){
         } catch { /* already exists */ }
     }
 
-    // Telegram bot bilan bog'lanish. Har do'kon o'z serverida, bot esa
-    // bitta va umumiy — bog'lanish shu jadval orqali saqlanadi.
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS \`bot_link\` (
-        \`id\`              INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-        \`chat_id\`         VARCHAR(40)  DEFAULT NULL,
-        \`chat_name\`       VARCHAR(200) DEFAULT NULL,
-        \`pair_code\`       VARCHAR(10)  DEFAULT NULL,
-        \`code_expires_at\` DATETIME     DEFAULT NULL,
-        \`token\`           VARCHAR(120) DEFAULT NULL,
-        \`active\`          TINYINT(1)   NOT NULL DEFAULT 1,
-        \`daily\`           TINYINT(1)   NOT NULL DEFAULT 1,
-        \`last_seen\`       DATETIME     DEFAULT NULL,
-        \`created_by\`      INT          DEFAULT NULL,
-        \`created_at\`      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        \`updated_at\`      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX \`idx_bot_token\` (\`token\`),
-        INDEX \`idx_bot_chat\`  (\`chat_id\`)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    `);
 
-    // Mijoz bilan muloqot tarixi (CRM eslatmalari).
-    // Har bir qo'ng'iroq/uchrashuv/va'da shu yerga yoziladi — qarz
-    // undirishda kim nima degani esdan chiqmasin.
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS \`client_note\` (
-        \`id\`         INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-        \`client_id\`  INT NOT NULL,
-        \`text\`       TEXT NOT NULL,
-        \`kind\`       VARCHAR(20) NOT NULL DEFAULT 'izoh',
-        \`remind_at\`  DATE DEFAULT NULL,
-        \`done\`       TINYINT(1) NOT NULL DEFAULT 0,
-        \`user_id\`    INT DEFAULT NULL,
-        \`user_name\`  VARCHAR(100) DEFAULT NULL,
-        \`created_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        \`updated_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX \`idx_note_client\` (\`client_id\`, \`created_at\`),
-        INDEX \`idx_note_remind\` (\`remind_at\`, \`done\`)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    `);
 
-    // Qoldiq "surat"lari (snapshot) — ommaviy o'zgarishdan oldin qoldiqlar
-    // shu jadvalga nusxalanadi va kerak bo'lsa bir buyruq bilan qaytariladi
-    try {
-        await require('../utils/stockGuard.utils').ensureTable();
-    } catch (e) {
-        console.log('stock_snapshot jadvali yaratilmadi:', e.message);
-    }
 
     // Bir martalik tuzatishlar. Bajarilgani `app_setting` da belgilanadi —
     // aks holda har server ishga tushganda takrorlanib, foydalanuvchi qo'lda
     // o'zgartirgan holatni bekor qilib yuborardi.
+    // FILIAL: mavjud foydalanuvchilarni biriktirish.
+    //   • Admin / Dasturchi / Programmer → bosh ofis (NULL): hamma filialni
+    //     ko'ra oladi, standart tanlovi asosiy filial — ish tartibi o'zgarmaydi,
+    //     lekin yangi filial ochib, unga xodim biriktira oladi.
+    //   • qolganlar (User)              → 1-filial ("Bogdod brend")
+    await runOnce(db, 'branch_assign_users_v1', async () => {
+        const [r] = await db.query(`
+          UPDATE \`user\` SET \`branch_id\` = 1
+           WHERE \`branch_id\` IS NULL
+             AND \`role\` NOT IN ('Admin', 'Dasturchi', 'Programmer')
+        `);
+        console.log(`Filialga biriktirildi: ${r?.affectedRows ?? 0} ta foydalanuvchi`);
+    });
+
+    // NASIYA: `sale.debt_paid` ni mavjud to'lovlardan to'ldirish va
+    // `client.balance` ni yagona qoida bo'yicha qayta hisoblash
+    // (utils/clientDebt.utils.js). Ilgari qarz to'lovi sotuvga
+    // bog'lanmasdi va Qarzdorlar ro'yxati to'langan qarzni ko'rsatib
+    // turardi.
+    await runOnce(db, 'backfill_debt_paid_v1', async () => {
+        const { syncAllClients } = require('../utils/clientDebt.utils');
+        const n = await syncAllClients();
+        console.log(`Qarz sinxronlandi: ${n} ta mijoz`);
+    });
+
     await runOnce(db, 'backfill_labels_printed_v1', async () => {
         // Bu funksiya qo'shilgunga qadar yaratilgan tezkor kiritish
         // hujjatlariga yorliq allaqachon chop etilgan deb hisoblaymiz —

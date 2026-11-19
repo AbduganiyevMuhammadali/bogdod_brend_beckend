@@ -1,6 +1,7 @@
 const sequelize = require('../db/db-sequelize');
 const HttpException = require('../utils/HttpException.utils');
 const stockGuard = require('../utils/stockGuard.utils');
+const { requireBranchId } = require('../utils/branchContext');
 
 /**
  * Qoldiq "suratlari" (snapshot).
@@ -13,14 +14,17 @@ class SnapshotController {
 
   // GET /api/v1/snapshots
   getAll = async (req, res) => {
+    const bid = requireBranchId();
     const [rows] = await sequelize.query(
       'SELECT `id`,`label`,`reason`,`user_name`,`rows_count`,`total_qty`,`created_at` ' +
-      'FROM `stock_snapshot` ORDER BY `id` DESC LIMIT 50'
+      'FROM `stock_snapshot` WHERE `branch_id` = ? ORDER BY `id` DESC LIMIT 50',
+      { replacements: [bid] }
     );
 
     // Hozirgi umumiy qoldiq — taqqoslash uchun
     const [[now]] = await sequelize.query(
-      'SELECT COALESCE(SUM(qty),0) s FROM `product`'
+      'SELECT COALESCE(SUM(qty),0) s FROM `product` WHERE `branch_id` = ?',
+      { replacements: [bid] }
     );
 
     res.json({
@@ -41,7 +45,8 @@ class SnapshotController {
   preview = async (req, res) => {
     const id = Number(req.params.id);
     const [[snap]] = await sequelize.query(
-      'SELECT * FROM `stock_snapshot` WHERE `id` = ?', { replacements: [id] }
+      'SELECT * FROM `stock_snapshot` WHERE `id` = ? AND `branch_id` = ?',
+      { replacements: [id, requireBranchId()] }
     );
     if (!snap) throw new HttpException(404, 'Surat topilmadi');
 
@@ -71,6 +76,12 @@ class SnapshotController {
   // POST /api/v1/snapshots/:id/restore
   restore = async (req, res) => {
     const id = Number(req.params.id);
+    // Boshqa filial suratini qaytarib bo'lmaydi
+    const [[snap]] = await sequelize.query(
+      'SELECT `id` FROM `stock_snapshot` WHERE `id` = ? AND `branch_id` = ?',
+      { replacements: [id, requireBranchId()] }
+    );
+    if (!snap) throw new HttpException(404, 'Surat topilmadi');
 
     // Qaytarishdan oldin hozirgi holatni ham saqlab qo'yamiz —
     // qaytarish ham noto'g'ri bo'lsa, orqaga yo'l qolsin

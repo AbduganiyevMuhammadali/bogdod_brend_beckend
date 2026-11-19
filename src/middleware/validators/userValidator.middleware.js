@@ -6,6 +6,8 @@ const extraFields = {
   warehouse:   Joi.string().max(100).allow('', null).optional(),
   permissions: Joi.object().allow(null).optional(),
   active:      Joi.boolean().optional(),
+  // Filial: raqam — shu filial xodimi, null — bosh ofis (hamma filial)
+  branch_id:   Joi.number().integer().positive().allow(null).optional(),
 };
 
 exports.userSchemas = {

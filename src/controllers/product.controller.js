@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const sequelize = require('../db/db-sequelize');
 const BaseController = require('./BaseController');
 const { barcodeVariants } = require('../utils/barcode.utils');
+const { requireBranchId } = require('../utils/branchContext');
 
 const ALLOWED_FIELDS = [
   'code', 'name', 'general_name', 'unit', 'brand', 'model', 'country',
@@ -20,10 +21,14 @@ const ALLOWED_FIELDS = [
 // xatosi chiqadi. Shuning uchun mavjud eng katta raqamdan davom etamiz va
 // band kodni uchratsak keyingisiga o'tamiz.
 async function nextProductCode(transaction = null) {
+  // `product.code` bazada UNIQUE (filialdan qat'i nazar), shuning uchun kod
+  // BARCHA filiallar bo'ylab qidiriladi — aks holda 2-filial 1-filialning
+  // kodini takrorlab, "Duplicate" xatosi chiqardi.
   const last = await ProductModel.findOne({
     where: { code: { [Op.like]: 'PRD-%' } },
     order: [['code', 'DESC']],
     paranoid: false,
+    allBranches: true,
     transaction,
   });
   let n = last ? (parseInt(String(last.code).replace('PRD-', ''), 10) || 0) : 0;
@@ -31,7 +36,7 @@ async function nextProductCode(transaction = null) {
   let code;
   do {
     code = `PRD-${String(++n).padStart(5, '0')}`;
-  } while (await ProductModel.findOne({ where: { code }, paranoid: false, transaction }));
+  } while (await ProductModel.findOne({ where: { code }, paranoid: false, allBranches: true, transaction }));
   return code;
 }
 
@@ -160,6 +165,9 @@ class ProductController extends BaseController {
     if (!data.name) throw new HttpException(400, 'Mahsulot nomi kiritilishi shart');
 
     if (!data.code) data.code = await nextProductCode();
+    else if (await ProductModel.findOne({ where: { code: data.code }, paranoid: false, allBranches: true })) {
+      throw new HttpException(400, `"${data.code}" kodi band (boshqa tovar yoki filialda)`);
+    }
 
     const product = await ProductModel.create(data);
     res.status(201).json(product);
@@ -231,10 +239,12 @@ class ProductController extends BaseController {
       // (paranoid: true), lekin ularning kodi bazada qoladi — natijada
       // takroriy kod chiqadi. Shuning uchun mavjud eng katta PRD-raqamdan
       // davom ettiramiz, o'chirilganlarni ham hisobga olib.
+      // Kod butun baza bo'ylab yagona (product.code UNIQUE) — hamma filial
       const lastCoded = await ProductModel.findOne({
         where: { code: { [Op.like]: 'PRD-%' } },
         order: [['code', 'DESC']],
         paranoid: false,
+        allBranches: true,
         transaction: t,
       });
       let counter = lastCoded
@@ -248,6 +258,7 @@ class ProductController extends BaseController {
         attributes: ['code'],
         where: { code: { [Op.like]: 'PRD-%' } },
         paranoid: false,
+        allBranches: true,
         raw: true,
         transaction: t,
       });
@@ -361,7 +372,7 @@ class ProductController extends BaseController {
       // Qoldiqli mahsulotlar uchun bitta kirim hujjati
       const withQty = created.filter(c => c.qty > 0);
       if (withQty.length) {
-        const maxDoc = await PurchaseModel.max('doc_number', { transaction: t });
+        const maxDoc = await PurchaseModel.max('doc_number', { where: { branch_id: requireBranchId() }, transaction: t });
         const total  = withQty.reduce((a, c) => a + c.qty * c.cost, 0);
 
         const purchase = await PurchaseModel.create({

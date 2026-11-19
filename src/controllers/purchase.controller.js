@@ -9,6 +9,7 @@ const SupplierModel        = require('../models/supplier.model');
 const UserModel            = require('../models/user.model');
 const HttpException        = require('../utils/HttpException.utils');
 const BaseController       = require('./BaseController');
+const { requireBranchId }  = require('../utils/branchContext');
 
 class PurchaseController extends BaseController {
 
@@ -93,8 +94,9 @@ class PurchaseController extends BaseController {
     res.json(fresh);
   };
 
+  // Hujjat raqami FILIAL ichida ketma-ket
   getNextDocNumber = async (req, res) => {
-    const max = await PurchaseModel.max('doc_number');
+    const max = await PurchaseModel.max('doc_number', { where: { branch_id: requireBranchId() } });
     res.json({ doc_number: (Number(max) || 0) + 1 });
   };
 
@@ -103,9 +105,11 @@ class PurchaseController extends BaseController {
     if (!header.date) header.date = new Date();
 
     if (!header.doc_number) {
-      const max = await PurchaseModel.max('doc_number');
+      const max = await PurchaseModel.max('doc_number', { where: { branch_id: requireBranchId() } });
       header.doc_number = (Number(max) || 0) + 1;
     }
+    // Filial va holat maydonlari tashqaridan kelmasin
+    delete header.branch_id; delete header.id;
 
     header.created_by = req.currentUser?.id ?? null;
     header.status     = header.status || 'draft';
@@ -149,6 +153,7 @@ class PurchaseController extends BaseController {
     if (purchase.status === 'confirmed') throw new HttpException(400, 'Tasdiqlangan hujjatni tahrirlab bo\'lmaydi');
 
     const { items = [], ...header } = req.body;
+    delete header.branch_id; delete header.id;
     const { total_sum, total_usd } = this._calcTotals(items, header.exchange_rate ?? purchase.exchange_rate);
     header.total_sum = total_sum;
     header.total_usd = total_usd;
@@ -215,6 +220,15 @@ class PurchaseController extends BaseController {
     });
     if (!purchase) throw new HttpException(404, req.mf('data not found'));
     if (purchase.status === 'cancelled') throw new HttpException(400, 'Allaqachon bekor qilingan');
+
+    // Bu partiyadan tovar SOTILGAN bo'lsa bekor qilib bo'lmaydi: sotuvlar
+    // tannarxi shu partiyaga bog'langan, foyda hisoboti va FIFO buzilardi.
+    const sotilgan = (purchase.items || []).filter(i => Number(i.sold_qty) > 0);
+    if (purchase.status === 'confirmed' && sotilgan.length) {
+      throw new HttpException(409,
+        `Bu kirimdan tovar sotilgan (${sotilgan.map(i => `${i.product_name}: ${Number(i.sold_qty)} dona`).slice(0, 5).join(', ')}` +
+        `${sotilgan.length > 5 ? ', ...' : ''}) — hujjatni bekor qilib bo'lmaydi.`);
+    }
 
     await sequelize.transaction(async (t) => {
       if (purchase.status === 'confirmed') {
@@ -384,15 +398,17 @@ class PurchaseController extends BaseController {
                WHERE p2.status = 'confirmed'
                  AND (pi2.unit_qty - pi2.sold_qty) > 0
                  AND pi2.product_id IS NOT NULL
+                 AND pi2.branch_id = :bid
                  ${ids.length ? 'AND pi2.product_id IN (:ids)' : ''}
                GROUP BY pi2.product_id
          ) f ON f.product_id = pi.product_id
             AND CONCAT(DATE_FORMAT(p.date, '%Y%m%d%H%i%s'),
                        LPAD(pi.id, 12, '0')) = f.mk
         WHERE p.status = 'confirmed'
-          AND (pi.unit_qty - pi.sold_qty) > 0`,
+          AND (pi.unit_qty - pi.sold_qty) > 0
+          AND pi.branch_id = :bid`,
       {
-        replacements: ids.length ? { ids } : {},
+        replacements: { ids, bid: requireBranchId() },
         type: sequelize.QueryTypes.SELECT,
       }
     );
@@ -443,7 +459,7 @@ class PurchaseController extends BaseController {
         if (!productName.toLowerCase().includes(q) && !productCode.toLowerCase().includes(q)) continue;
       }
 
-      const soldSum  = await SaleItemModel.sum('total_sum', { where: { purchase_item_id: b.id } }) || 0;
+      const soldSum  = await SaleItemModel.sum('total_sum', { where: { purchase_item_id: b.id, branch_id: requireBranchId() } }) || 0;
       const unitQty  = Number(b.unit_qty)   || 0;
       const soldQty  = Number(b.sold_qty)   || 0;
       const costPrice = Number(b.cost_price) || 0;
@@ -538,8 +554,9 @@ class PurchaseController extends BaseController {
       const product = await ProductModel.findOne({ where: { id: item.product_id }, transaction });
       if (!product) continue;
       const subQty = Number(item.unit_qty) || 0;
+      // Clamp yo'q: kirim bekor qilinsa qoldiq aynan kelgan miqdorga kamayadi
       await product.update(
-        { qty: Math.max(0, Number(product.qty) - subQty) },
+        { qty: Number(product.qty) - subQty },
         { transaction }
       );
     }

@@ -9,6 +9,7 @@ const HttpException      = require('../utils/HttpException.utils');
 const BaseController     = require('./BaseController');
 const stockGuard         = require('../utils/stockGuard.utils');
 const { barcodeVariants } = require('../utils/barcode.utils');
+const { requireBranchId } = require('../utils/branchContext');
 
 // Mahsulotning joriy tannarxi — FIFO bo'yicha eng eski ochiq partiyadan.
 // Farq summasini hisoblashda ishlatiladi.
@@ -159,6 +160,7 @@ class InventoryController extends BaseController {
 
     const q = (sql, repl = []) =>
       sequelize.query(sql, { replacements: repl, type: sequelize.QueryTypes.SELECT });
+    const bid = requireBranchId();
 
     // ── 1. Ombor holati ──────────────────────────────────────────
     //
@@ -174,7 +176,7 @@ class InventoryController extends BaseController {
         SUM(CASE WHEN is_folder = 0 AND active = 1 AND qty = 0 THEN 1 ELSE 0 END) qoldigi_nol,
         SUM(CASE WHEN is_folder = 0 AND active = 1 AND qty < 0 THEN 1 ELSE 0 END) manfiy,
         SUM(CASE WHEN is_folder = 0 AND active = 1 AND qty > 0 THEN qty ELSE 0 END) jami_dona
-      FROM \`product\``);
+      FROM \`product\` WHERE branch_id = ?`, [bid]);
 
     // ── 1b. MANFIY QOLDIQLAR ─────────────────────────────────────
     //
@@ -184,8 +186,8 @@ class InventoryController extends BaseController {
     const manfiyRoyxat = await q(`
       SELECT id, name nomi, qty qoldiq, barcodes
       FROM \`product\`
-      WHERE is_folder = 0 AND active = 1 AND qty < 0
-      ORDER BY qty ASC LIMIT 200`);
+      WHERE is_folder = 0 AND active = 1 AND qty < 0 AND branch_id = ?
+      ORDER BY qty ASC LIMIT 200`, [bid]);
 
     // ── 1c. PARTIYA NOMUVOFIQLIGI ────────────────────────────────
     //
@@ -201,9 +203,9 @@ class InventoryController extends BaseController {
         SELECT product_id, SUM(stock_qty) jami
         FROM \`purchase_item\` GROUP BY product_id
       ) b ON b.product_id = p.id
-      WHERE p.is_folder = 0 AND p.active = 1
+      WHERE p.is_folder = 0 AND p.active = 1 AND p.branch_id = ?
         AND p.qty <> COALESCE(b.jami, 0)
-      ORDER BY ABS(p.qty - COALESCE(b.jami, 0)) DESC LIMIT 200`);
+      ORDER BY ABS(p.qty - COALESCE(b.jami, 0)) DESC LIMIT 200`, [bid]);
 
     const [nomuvofiqJami] = await q(`
       SELECT COUNT(*) n FROM \`product\` p
@@ -211,8 +213,8 @@ class InventoryController extends BaseController {
         SELECT product_id, SUM(stock_qty) jami
         FROM \`purchase_item\` GROUP BY product_id
       ) b ON b.product_id = p.id
-      WHERE p.is_folder = 0 AND p.active = 1
-        AND p.qty <> COALESCE(b.jami, 0)`);
+      WHERE p.is_folder = 0 AND p.active = 1 AND p.branch_id = ?
+        AND p.qty <> COALESCE(b.jami, 0)`, [bid]);
 
     // ── 1d. BIR NECHTA DONA BO'LGAN TOVARLAR ─────────────────────
     //
@@ -224,7 +226,7 @@ class InventoryController extends BaseController {
         SUM(CASE WHEN qty > 1 THEN qty ELSE 0 END) kop_dona,
         MAX(qty) eng_kop
       FROM \`product\`
-      WHERE is_folder = 0 AND active = 1 AND qty > 0`);
+      WHERE is_folder = 0 AND active = 1 AND qty > 0 AND branch_id = ?`, [bid]);
 
     // ── 2. Sanoq satrlari ────────────────────────────────────────
     const [sanoq] = await q(`
@@ -252,11 +254,11 @@ class InventoryController extends BaseController {
       WHERE ${TOPILMADI} AND p.barcodes IN (
         SELECT barcodes FROM (
           SELECT barcodes FROM \`product\`
-          WHERE is_folder = 0 AND active = 1
+          WHERE is_folder = 0 AND active = 1 AND branch_id = ?
             AND barcodes IS NOT NULL AND barcodes <> '' AND barcodes <> '[]'
           GROUP BY barcodes HAVING COUNT(*) > 1
         ) x
-      )`, [doc.id]);
+      )`, [doc.id, bid]);
 
     // Sanoq ochilgandan keyin sotilganlar — javonda yo'q edi
     let sotilgan = { n: 0, dona: 0 };
@@ -283,10 +285,10 @@ class InventoryController extends BaseController {
       SELECT p.barcodes kod, COUNT(*) soni, SUM(p.qty) dona,
              GROUP_CONCAT(p.name ORDER BY p.id SEPARATOR ' • ') nomlar
       FROM \`product\` p
-      WHERE p.is_folder = 0 AND p.active = 1
+      WHERE p.is_folder = 0 AND p.active = 1 AND p.branch_id = ?
         AND p.barcodes IS NOT NULL AND p.barcodes <> '' AND p.barcodes <> '[]'
       GROUP BY p.barcodes HAVING soni > 1
-      ORDER BY soni DESC, dona DESC LIMIT 100`);
+      ORDER BY soni DESC, dona DESC LIMIT 100`, [bid]);
 
     // Skanerlanmaganlar — texnik sabab yo'q, shunchaki sanalmagan
     const skanerlanmagan = Math.max(0,
@@ -405,9 +407,9 @@ class InventoryController extends BaseController {
             SELECT product_id, SUM(stock_qty) jami
             FROM \`purchase_item\` GROUP BY product_id
           ) b ON b.product_id = p.id
-          WHERE p.is_folder = 0 AND p.active = 1
+          WHERE p.is_folder = 0 AND p.active = 1 AND p.branch_id = :bid
             AND p.qty <> COALESCE(b.jami, 0) AND p.qty >= 0`,
-          { type: sequelize.QueryTypes.SELECT, transaction: t });
+          { replacements: { bid: requireBranchId() }, type: sequelize.QueryTypes.SELECT, transaction: t });
 
         for (const r of rows) {
           const kerak = Number(r.qty) || 0;
@@ -484,7 +486,7 @@ class InventoryController extends BaseController {
 
     let doc;
     await sequelize.transaction(async (t) => {
-      const maxDoc = await InventoryModel.max('doc_number', { transaction: t });
+      const maxDoc = await InventoryModel.max('doc_number', { where: { branch_id: requireBranchId() }, transaction: t });
       doc = await InventoryModel.create({
         doc_number: (Number(maxDoc) || 0) + 1,
         date: new Date(),
@@ -996,7 +998,7 @@ class InventoryController extends BaseController {
           } else {
             // Partiya umuman yo'q (masalan skanerda topilgan yangi tovar) —
             // FIFO ishlashi uchun bittasini ochamiz
-            const maxDoc = await PurchaseModel.max('doc_number', { transaction: t });
+            const maxDoc = await PurchaseModel.max('doc_number', { where: { branch_id: requireBranchId() }, transaction: t });
             const purchase = await PurchaseModel.create({
               doc_number: (Number(maxDoc) || 0) + 1,
               date: new Date(),

@@ -1,4 +1,5 @@
 const sequelize = require('../db/db-sequelize');
+const { getBranchId } = require('./branchContext');
 
 /**
  * Qoldiqni ommaviy o'zgartiruvchi amallar uchun himoya qatlami.
@@ -25,6 +26,7 @@ async function ensureTable() {
       \`user_name\`  VARCHAR(100) DEFAULT NULL,
       \`rows_count\` INT NOT NULL DEFAULT 0,
       \`total_qty\`  DECIMAL(18,3) NOT NULL DEFAULT 0,
+      \`branch_id\`  INT NOT NULL DEFAULT 1,
       \`created_at\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       INDEX \`idx_snap_created\` (\`created_at\`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -48,14 +50,17 @@ async function ensureTable() {
 async function takeSnapshot({ label, reason = null, user = null, transaction = null } = {}) {
   const t = transaction;
 
+  // Faqat joriy filial tovarlari — surat filialga tegishli
+  const branchId = Number(getBranchId()) || 1;
+
   const [[agg]] = await sequelize.query(
-    'SELECT COUNT(*) n, COALESCE(SUM(qty),0) s FROM `product`',
-    { transaction: t }
+    'SELECT COUNT(*) n, COALESCE(SUM(qty),0) s FROM `product` WHERE `branch_id` = ?',
+    { replacements: [branchId], transaction: t }
   );
 
   const [res] = await sequelize.query(
-    'INSERT INTO `stock_snapshot` (`label`,`reason`,`user_id`,`user_name`,`rows_count`,`total_qty`) ' +
-    'VALUES (?,?,?,?,?,?)',
+    'INSERT INTO `stock_snapshot` (`label`,`reason`,`user_id`,`user_name`,`rows_count`,`total_qty`,`branch_id`) ' +
+    'VALUES (?,?,?,?,?,?,?)',
     {
       replacements: [
         String(label).slice(0, 120),
@@ -64,6 +69,7 @@ async function takeSnapshot({ label, reason = null, user = null, transaction = n
         user?.username ? String(user.username).slice(0, 100) : null,
         Number(agg.n) || 0,
         Number(agg.s) || 0,
+        branchId,
       ],
       transaction: t,
     }
@@ -73,8 +79,8 @@ async function takeSnapshot({ label, reason = null, user = null, transaction = n
   // Qoldiqlarni bitta INSERT...SELECT bilan ko'chiramiz — 2000+ tovarda ham tez
   await sequelize.query(
     'INSERT INTO `stock_snapshot_item` (`snapshot_id`,`product_id`,`qty`) ' +
-    'SELECT ?, `id`, `qty` FROM `product`',
-    { replacements: [snapId], transaction: t }
+    'SELECT ?, `id`, `qty` FROM `product` WHERE `branch_id` = ?',
+    { replacements: [snapId, branchId], transaction: t }
   );
 
   return snapId;
@@ -116,9 +122,10 @@ async function restoreSnapshot(snapshotId, { transaction = null } = {}) {
  * Snapshot'lar arzon (faqat id+qty), lekin cheksiz o'smasin.
  */
 async function pruneSnapshots(keep = 30) {
+  const branchId = Number(getBranchId()) || 1;
   const [rows] = await sequelize.query(
-    'SELECT `id` FROM `stock_snapshot` ORDER BY `id` DESC LIMIT ? OFFSET ?',
-    { replacements: [1000, keep] }
+    'SELECT `id` FROM `stock_snapshot` WHERE `branch_id` = ? ORDER BY `id` DESC LIMIT ? OFFSET ?',
+    { replacements: [branchId, 1000, keep] }
   );
   if (!rows.length) return 0;
   const ids = rows.map(r => Number(r.id));

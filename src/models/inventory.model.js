@@ -10,6 +10,11 @@ const sequelize = require('../db/db-sequelize');
 class InventoryModel extends Model {}
 
 InventoryModel.init({
+  // Filial — barcha ma'lumot filialga bo'linadi (db/branchScope.js avtomatik qo'yadi)
+  // defaultValue YO'Q: qiymatni db/branchScope.js hook'i joriy filialdan yozadi.
+  // Default bo'lsa hook "allaqachon bor" deb o'tkazib yuborardi va hamma
+  // yangi yozuv 1-filialga tushardi.
+  branch_id: { type: DataTypes.INTEGER, allowNull: false },
   id:         { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
   doc_number: { type: DataTypes.INTEGER, allowNull: false },
   date:       { type: DataTypes.DATE,    allowNull: false, defaultValue: DataTypes.NOW },
