@@ -10,6 +10,7 @@
 // ruxsatlari oddiy sahifalardagidek amal qiladi.
 const HttpException = require('../utils/HttpException.utils');
 const gemini        = require('../services/gemini.service');
+const oa            = require('../services/openaiCompat.service');
 const tools         = require('../services/aiTools');
 const { isAdmin, canView } = require('../utils/perms.utils');
 const sequelize     = require('../db/db-sequelize');
@@ -134,9 +135,11 @@ function ajratTranskript(text) {
 }
 
 async function ovozlashtir(cfg, text) {
-  if (!cfg.ttsModel || cfg.ttsModel === 'browser') return { audio: null };
+  if (!cfg.activeTts || cfg.activeTts === 'browser') return { audio: null };
   try {
-    const audio = await gemini.synthesize(text, { apiKey: cfg.apiKey, model: cfg.ttsModel, voice: cfg.voice, endpoint: cfg.endpoint, relayToken: cfg.relayToken });
+    const audio = cfg.provider === 'openai'
+      ? await oa.speech({ baseUrl: cfg.oaBaseUrl, apiKey: cfg.oaApiKey, ttsModel: cfg.oaTtsModel, ttsVoice: cfg.oaTtsVoice }, text)
+      : await gemini.synthesize(text, { apiKey: cfg.apiKey, model: cfg.ttsModel, voice: cfg.voice, endpoint: cfg.endpoint, relayToken: cfg.relayToken });
     return { audio };
   } catch (e) {
     console.log('[AI] TTS xatosi:', e.message);
@@ -151,9 +154,10 @@ class AiController {
     const cfg = await gemini.getConfig();
     const out = {
       enabled:    cfg.enabled,
-      configured: !!cfg.apiKey,
-      model:      cfg.model,
-      ttsModel:   cfg.ttsModel,
+      configured: !!cfg.activeKey,
+      provider:   cfg.provider,
+      model:      cfg.provider === 'openai' ? cfg.oaModel : cfg.model,
+      ttsModel:   cfg.activeTts,
       voice:      cfg.voice,
       greeting:   cfg.greeting,
       mode:       cfg.effectiveMode,
@@ -162,7 +166,7 @@ class AiController {
     };
     // Brauzer rejimi: Gemini'ga brauzer murojaat qiladi — kalit va manzil
     // faqat tizimga kirgan (JWT) foydalanuvchiga beriladi.
-    if (cfg.effectiveMode === 'browser' && cfg.enabled && cfg.apiKey) {
+    if (cfg.provider === 'gemini' && cfg.effectiveMode === 'browser' && cfg.enabled && cfg.apiKey) {
       out.browser = { apiKey: cfg.apiKey, endpoint: gemini.DEFAULT_ENDPOINT, model: cfg.model,
                       ttsModel: cfg.ttsModel, voice: cfg.voice, thinking: cfg.thinking };
     }
@@ -199,6 +203,10 @@ class AiController {
     const cfg = await gemini.getConfig({ fresh: true });
     res.json({
       enabled: cfg.enabled, greeting: cfg.greeting,
+      provider: cfg.provider,
+      // OpenAI-mos provayder (Mistral / DeepSeek / boshqa)
+      oa: { baseUrl: cfg.oaBaseUrl, preset: oa.presetOf(cfg.oaBaseUrl), hasKey: !!cfg.oaApiKey, keyMasked: gemini.maskKey(cfg.oaApiKey),
+            model: cfg.oaModel, audioModel: cfg.oaAudioModel, ttsModel: cfg.oaTtsModel, ttsVoice: cfg.oaTtsVoice, presets: oa.PRESETS },
       hasKey: !!cfg.apiKey, keyMasked: gemini.maskKey(cfg.apiKey), keyFromEnv: cfg.keyFromEnv,
       model: cfg.model, ttsModel: cfg.ttsModel, voice: cfg.voice, thinking: cfg.thinking,
       // Ulanish: relay manzili va tokeni (token yashirin ko'rsatiladi)
@@ -238,6 +246,34 @@ class AiController {
       if (!['auto', 'server', 'browser'].includes(b.mode)) throw new HttpException(400, 'Rejim noto\'g\'ri');
       patch.mode = b.mode;
     }
+    if (b.provider !== undefined) {
+      if (!['gemini', 'openai'].includes(b.provider)) throw new HttpException(400, 'Provayder noto\'g\'ri');
+      patch.provider = b.provider;
+    }
+    if (b.oaBaseUrl !== undefined) {
+      const u = String(b.oaBaseUrl || '').trim();
+      if (!/^https?:\/\/[^\s]+$/i.test(u)) throw new HttpException(400, 'Provayder manzili http(s):// bilan boshlanishi kerak');
+      patch.oaBaseUrl = u;
+    }
+    for (const [k, lbl] of [['oaModel', 'Model'], ['oaAudioModel', 'Ovozli model'], ['oaTtsModel', 'TTS modeli']]) {
+      if (b[k] !== undefined) {
+        const m = String(b[k] || '').trim();
+        if (m && !/^[a-z0-9][a-z0-9.\-_:/]{1,80}$/i.test(m)) throw new HttpException(400, `${lbl} nomi noto'g'ri`);
+        if (k === 'oaModel' && !m) throw new HttpException(400, 'Model nomi bo\'sh');
+        patch[k] = m;
+      }
+    }
+    if (b.oaTtsVoice !== undefined) patch.oaTtsVoice = String(b.oaTtsVoice || '').trim().slice(0, 100);
+    if (b.oaApiKey !== undefined) {
+      if (b.oaApiKey === null || b.oaApiKey === '') { /* o'zgartirilmaydi */ }
+      else if (b.oaApiKey === '__delete__') patch.oaApiKey = null;
+      else {
+        const k = String(b.oaApiKey).trim();
+        if (k.includes('•')) { /* yashirilgan ko'rinish */ }
+        else if (k.length < 16 || /\s/.test(k)) throw new HttpException(400, 'Provayder API kaliti noto\'g\'ri ko\'rinadi');
+        else patch.oaApiKey = k;
+      }
+    }
     if (b.endpoint !== undefined) {
       const u = String(b.endpoint || '').trim();
       if (u && !/^https?:\/\/[^\s]+$/i.test(u)) throw new HttpException(400, 'Relay manzili http(s):// bilan boshlanishi kerak');
@@ -268,10 +304,16 @@ class AiController {
   /** POST /api/v1/ai/test (admin) — kalit va modelni tekshirish */
   test = async (req, res) => {
     const cfg = await gemini.getConfig({ fresh: true });
-    if (!cfg.apiKey) throw new HttpException(400, 'Avval API kalitini saqlang');
+    if (!cfg.activeKey) throw new HttpException(400, 'Avval API kalitini saqlang');
+    const t0 = Date.now();
+    if (cfg.provider === 'openai') {
+      const text = await oa.ping({ baseUrl: cfg.oaBaseUrl, apiKey: cfg.oaApiKey, model: cfg.oaModel }) || '(bo\'sh javob)';
+      const out = { ok: true, provider: 'openai', model: cfg.oaModel, text, ms: Date.now() - t0 };
+      if (req.body?.speak !== false) { const { audio, ttsError } = await ovozlashtir(cfg, text); out.audio = audio; if (ttsError) out.ttsError = ttsError; }
+      return res.json(out);
+    }
     // Brauzer rejimi: sinovni brauzer o'zi bajaradi (server Gemini'ga yetolmaydi)
     if (cfg.effectiveMode === 'browser') return res.json({ ok: true, browserMode: true, model: cfg.model });
-    const t0 = Date.now();
     const data = await gemini.interact({
       model: cfg.model, store: false,
       system_instruction: 'Faqat o\'zbek tilida, bitta qisqa gap bilan javob ber.',
@@ -324,9 +366,9 @@ class AiController {
     gaplar.push('Nima bilan yordam beray?');
     const text = gaplar.join(' ');
 
-    const out = { text, configured: !!cfg.apiKey, enabled: cfg.enabled };
+    const out = { text, configured: !!cfg.activeKey, enabled: cfg.enabled };
     out.mode = cfg.effectiveMode;
-    if (req.query.speak === '1' && cfg.apiKey && cfg.enabled && cfg.effectiveMode !== 'browser') {
+    if (req.query.speak === '1' && cfg.activeKey && cfg.enabled && cfg.effectiveMode !== 'browser') {
       const { audio, ttsError } = await ovozlashtir(cfg, text);
       out.audio = audio; if (ttsError) out.ttsError = ttsError;
     }
@@ -337,12 +379,43 @@ class AiController {
   speak = async (req, res) => {
     const cfg = await gemini.getConfig();
     if (!cfg.enabled) throw new HttpException(403, 'AI yordamchi o\'chirilgan');
-    if (!cfg.apiKey) throw new HttpException(503, 'Gemini API kaliti kiritilmagan');
+    if (!cfg.activeKey) throw new HttpException(503, 'AI provayderi kaliti kiritilmagan');
     const text = String(req.body?.text || '').trim();
     if (!text) throw new HttpException(400, 'Matn bo\'sh');
     checkLimit(req.currentUser.id);
-    const audio = await gemini.synthesize(text, { apiKey: cfg.apiKey, model: cfg.ttsModel === 'browser' ? gemini.DEFAULTS.ttsModel : cfg.ttsModel, voice: cfg.voice, endpoint: cfg.endpoint, relayToken: cfg.relayToken });
+    const { audio, ttsError } = await ovozlashtir({ ...cfg, activeTts: cfg.activeTts === 'browser' ? (cfg.provider === 'openai' ? cfg.oaTtsModel : gemini.DEFAULTS.ttsModel) : cfg.activeTts }, text);
+    if (!audio) throw new HttpException(502, ttsError || 'Ovoz tayyorlanmadi');
     res.json(audio);
+  };
+
+  /** OpenAI-mos provayder (Mistral/DeepSeek) orqali suhbat — natija Gemini bilan bir xil shaklda */
+  chatOpenAi = async (req, res, cfg) => {
+    checkLimit(req.currentUser.id);
+    const body = req.body || {};
+    const text = String(body.text || '').trim().slice(0, 4000);
+    let audio = null;
+    if (body.audio?.data) {
+      const mime = AUDIO_MIMES[String(body.audio.mime || '').split(';')[0].trim().toLowerCase()];
+      if (!mime) throw new HttpException(400, `Audio formati qo'llanmaydi: ${body.audio.mime}`);
+      if (String(body.audio.data).length > MAX_AUDIO_B64) throw new HttpException(413, 'Audio juda katta (maks ~6 MB)');
+      if (!cfg.oaAudioModel) throw new HttpException(400, 'Bu provayderda ovozli xabar qo\'llanmaydi — matn yozing');
+      audio = { mime, data: String(body.audio.data) };
+    }
+    if (!text && !audio) throw new HttpException(400, 'Savol bo\'sh');
+    const userTools = tools.toolsFor(req.currentUser);
+    const ctx = { user: req.currentUser, branch: req.branch, actions: [] };
+    const t0 = Date.now();
+    const r = await oa.runAgent(
+      { baseUrl: cfg.oaBaseUrl, apiKey: cfg.oaApiKey, model: cfg.oaModel, audioModel: cfg.oaAudioModel },
+      { systemInstruction: systemInstruction(req, userTools), history: Array.isArray(body.history) ? body.history : [], text, audio, decls: tools.declarations(userTools) },
+      (name, args) => tools.runTool(userTools, name, args, ctx),
+    );
+    let finalText = r.text, transcript = null;
+    if (audio) ({ text: finalText, transcript } = ajratTranskript(finalText));
+    if (!finalText) finalText = r.used.length ? 'Ma\'lumot olindi, lekin xulosa yozilmadi. Qayta so\'rab ko\'ring.' : 'Javob tayyorlay olmadim. Qayta so\'rab ko\'ring.';
+    const out = { text: finalText, transcript, actions: ctx.actions, tools: [...new Set(r.used)], ms: Date.now() - t0 };
+    if (body.speak) { const { audio: a, ttsError } = await ovozlashtir(cfg, finalText); out.audio = a; if (ttsError) out.ttsError = ttsError; }
+    res.json(out);
   };
 
   /**
@@ -353,7 +426,8 @@ class AiController {
   chat = async (req, res) => {
     const cfg = await gemini.getConfig();
     if (!cfg.enabled) throw new HttpException(403, 'AI yordamchi o\'chirilgan (Sozlamalar → AI yordamchi)');
-    if (!cfg.apiKey) throw new HttpException(503, 'Gemini API kaliti kiritilmagan (Sozlamalar → AI yordamchi)');
+    if (!cfg.activeKey) throw new HttpException(503, 'AI provayderi kaliti kiritilmagan (Sozlamalar → AI yordamchi)');
+    if (cfg.provider === 'openai') return this.chatOpenAi(req, res, cfg);
     if (cfg.effectiveMode === 'browser') {
       const e = new HttpException(409, 'Brauzer rejimi: Gemini\'ga brauzer murojaat qiladi'); e.data = { code: 'BROWSER_MODE' }; throw e;
     }

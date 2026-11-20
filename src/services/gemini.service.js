@@ -49,6 +49,14 @@ const KEYS = {
   //   auto    — server; joylashuv xatosi ko'rilsa o'z-o'zidan browser'ga o'tadi
   mode:            'ai_mode',
   locationBlocked: 'ai_location_blocked',
+  // Provayder: 'gemini' (Google) yoki 'openai' (OpenAI-mos: Mistral, DeepSeek, boshqa)
+  provider:   'ai_provider',
+  oaBaseUrl:  'ai_oa_base_url',
+  oaApiKey:   'ai_oa_api_key',
+  oaModel:    'ai_oa_model',
+  oaAudioModel: 'ai_oa_audio_model',  // ovozli xabar uchun model (Mistral: voxtral-small-latest)
+  oaTtsModel: 'ai_oa_tts_model',      // TTS (bo'sh = brauzer ovozi)
+  oaTtsVoice: 'ai_oa_tts_voice',
 };
 
 let cache = { at: 0, cfg: null };
@@ -68,6 +76,13 @@ async function getConfig({ fresh = false } = {}) {
     voice:    (m[KEYS.voice]    || DEFAULTS.voice).trim(),
     thinking: (m[KEYS.thinking] || DEFAULTS.thinking).trim(),
     greeting: bool(m[KEYS.greeting], DEFAULTS.greeting),
+    provider:   m[KEYS.provider] === 'openai' ? 'openai' : 'gemini',
+    oaBaseUrl:  (m[KEYS.oaBaseUrl] || process.env.AI_OA_BASE_URL || 'https://api.mistral.ai/v1').trim().replace(/\/+$/, ''),
+    oaApiKey:   (m[KEYS.oaApiKey]  || process.env.AI_OA_API_KEY || '').trim(),
+    oaModel:    (m[KEYS.oaModel]   || process.env.AI_OA_MODEL || 'mistral-small-latest').trim(),
+    oaAudioModel: (m[KEYS.oaAudioModel] ?? 'voxtral-small-latest').trim(),
+    oaTtsModel: (m[KEYS.oaTtsModel] ?? 'voxtral-mini-tts-3-0').trim(),
+    oaTtsVoice: (m[KEYS.oaTtsVoice] || '').trim(),
     mode:       ['auto', 'server', 'browser'].includes(m[KEYS.mode]) ? m[KEYS.mode] : 'auto',
     locationBlocked: m[KEYS.locationBlocked] === 'true',
     endpoint:   (m[KEYS.endpoint] || ENDPOINT).trim(),
@@ -77,10 +92,14 @@ async function getConfig({ fresh = false } = {}) {
     // Kalit .env dan kelganmi (UI da "serverda belgilangan" deb ko'rsatiladi)
     keyFromEnv: !m[KEYS.apiKey] && !!process.env.GEMINI_API_KEY,
   };
-  // Amaldagi rejim
-  cfg.effectiveMode = cfg.mode === 'browser' ? 'browser'
+  // Amaldagi rejim. OpenAI-mos provayderga server o'zi yetadi — doim server.
+  cfg.effectiveMode = cfg.provider === 'openai' ? 'server'
+                    : cfg.mode === 'browser' ? 'browser'
                     : cfg.mode === 'server'  ? 'server'
                     : (cfg.locationBlocked && !cfg.endpointCustom) ? 'browser' : 'server';
+  // Amaldagi kalit/TTS (provayderga qarab) — kontroller shulardan foydalanadi
+  cfg.activeKey = cfg.provider === 'openai' ? cfg.oaApiKey : cfg.apiKey;
+  cfg.activeTts = cfg.provider === 'openai' ? (cfg.oaTtsModel || 'browser') : cfg.ttsModel;
   cache = { at: Date.now(), cfg };
   return cfg;
 }
@@ -100,6 +119,14 @@ async function saveConfig(patch) {
   if (patch.ttsModel !== undefined) await put(KEYS.ttsModel, String(patch.ttsModel).trim().slice(0, 100));
   if (patch.voice)    await put(KEYS.voice,    String(patch.voice).trim().slice(0, 60));
   if (patch.thinking) await put(KEYS.thinking, String(patch.thinking).trim().slice(0, 20));
+  if (patch.provider !== undefined && ['gemini', 'openai'].includes(patch.provider)) await put(KEYS.provider, patch.provider);
+  if (patch.oaBaseUrl !== undefined)    await put(KEYS.oaBaseUrl,    String(patch.oaBaseUrl || '').trim().slice(0, 300));
+  if (patch.oaModel !== undefined)      await put(KEYS.oaModel,      String(patch.oaModel || '').trim().slice(0, 100));
+  if (patch.oaAudioModel !== undefined) await put(KEYS.oaAudioModel, String(patch.oaAudioModel || '').trim().slice(0, 100));
+  if (patch.oaTtsModel !== undefined)   await put(KEYS.oaTtsModel,   String(patch.oaTtsModel || '').trim().slice(0, 100));
+  if (patch.oaTtsVoice !== undefined)   await put(KEYS.oaTtsVoice,   String(patch.oaTtsVoice || '').trim().slice(0, 100));
+  if (patch.oaApiKey)                   await put(KEYS.oaApiKey,     String(patch.oaApiKey).trim());
+  if (patch.oaApiKey === null)          await put(KEYS.oaApiKey,     '');
   if (patch.mode !== undefined && ['auto', 'server', 'browser'].includes(patch.mode)) await put(KEYS.mode, patch.mode);
   // Relay yoki rejim o'zgarsa server yo'lini qayta sinab ko'ramiz
   if (patch.endpoint !== undefined || patch.mode !== undefined) await put(KEYS.locationBlocked, 'false');
